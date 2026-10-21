@@ -871,6 +871,25 @@ wait "$HOLDER" 2>/dev/null
 rm -rf "$OUT"
 teardown
 
+# --- a background record that cannot be written still syncs and warns --
+# The warning runs only when the list's guard or write fails, so a fault in
+# it -- a name unset under `set -u` -- would end the hook before the sync.
+setup
+OUT=$(mktemp -d)
+mkdir -p "$OUT/.beads"
+sleep 300 &
+HOLDER=$!
+hold_lock "$WS/.beads/.augment-sync.async.guard" "$HOLDER"
+OUTPUT=$(event "bd -C $OUT close CHR-1 &" | "$BASH_UNDER_TEST" "$HOOK" 2>/dev/null)
+grep -q "push $OUT" "$BD_LOG.dirs" && report ok ||
+  report bad "a background record that cannot be written must not stop the sync (dirs: $(tr '\n' ',' <"$BD_LOG.dirs" 2>/dev/null))"
+grep -q "as written in the background" <<<"$OUTPUT" && report ok ||
+  report bad "a background record that cannot be written must be warned about (output: $OUTPUT)"
+kill "$HOLDER" 2>/dev/null
+wait "$HOLDER" 2>/dev/null
+rm -rf "$OUT"
+teardown
+
 # --- a settled external target is forgotten ----------------------------
 # The record exists only to carry unfinished work forward. Kept past that,
 # every later invocation would commit a store it has no reason to touch --

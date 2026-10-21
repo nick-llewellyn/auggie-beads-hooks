@@ -54,8 +54,10 @@ On **PostToolUse** for `launch-process`, it scans the command. Any `bd` call
 not known to be read-only counts as a write. The scanner also works out which
 store each call addresses: a workspace root, `bd -C <dir>`, `bd --db <path>`,
 `BEADS_DIR` or `BEADS_DB`, following `cd`, shell variables and wrappers such
-as `env`, `xargs` and `bash -c`. A read-only command such as `bd list` or
-`bd show` causes no sync.
+as `env`, `xargs` and `bash -c`, and resolving symlinks as `bd`, `cd` and
+`cd -P` do. A read-only command such as `bd list` or `bd show` causes no
+sync. A command too deeply nested to scan within a few seconds is treated as
+a failed scan: the workspace roots are synced and the hook warns.
 
 On **SessionEnd**, it syncs every workspace root that has a `.beads/`, and
 every recorded external store, without looking at any command. This catches
@@ -79,6 +81,11 @@ A store outside the workspace roots, written through `bd -C`, is recorded in
 the first root's `.beads/.augment-sync.external`, so a failed sync there is
 retried by a later invocation. The entry is removed once a sync of that store
 completes, or when the store no longer exists.
+
+A write the command runs in the background, after `&` or in a coprocess, can
+land after the hook has synced. Its external store is also recorded in the
+first root's `.beads/.augment-sync.async`, which only SessionEnd reads: it
+moves each store back into `.augment-sync.external` and syncs it.
 
 The hook always exits 0. It reports problems as `beads:` warnings: on
 PostToolUse as context the agent sees with the tool result, on SessionEnd on
@@ -215,6 +222,7 @@ The sync hook keeps its state beside each store, in `.beads/`:
 | `.augment-sync.child` | The `bd` process doing the work. |
 | `.augment-sync.reclaim` | Guard held while a dead owner's lock is reclaimed. |
 | `.augment-sync.external` | External stores owed a sync, in workspace roots only, with its `.guard`. |
+| `.augment-sync.async` | External stores written in the background, kept for SessionEnd, with its `.guard`. |
 
 All of it is per-machine and transient. The `.beads/.gitignore` that
 `bd init` generates covers only the lock, through `*.lock`, so add:
@@ -297,6 +305,9 @@ and require `Auggie hook tests gate`:
 - A store the scanner cannot name is reported in a warning rather than
   synced: `bd -C "$X"` where `$X` is known only at run time, a plain `bd` in
   a directory the event did not report, or script run through `eval`.
+- Only `&` and `coproc` count as background. A wrapper that detaches its
+  command, such as `setsid -f` or `sudo -b`, is not recognised, and a
+  background write still running when the session ends is not waited for.
 - The push always targets the remote named `origin`.
 - The hooks add to, and do not replace, the git hook shims `bd init`
   installs under `.beads/hooks/`.
@@ -305,7 +316,8 @@ and require `Auggie hook tests gate`:
 
 - **`beads: jq not found ...`**: install `jq`.
 - **`beads: could not scan the command for bead writes ...`**: `shfmt` or
-  `python3` is missing or failed. The workspace roots are still synced.
+  `python3` is missing or failed, or the command nests loops, functions or
+  scripts too deeply to scan in time. The workspace roots are still synced.
 - **`beads: 'bd dolt push' failed ... NOT on the remote`**: the store has no
   working `origin`. Add one, fix its credentials, or set
   `dolt.auto-push: false` if the store is meant to stay local. The request

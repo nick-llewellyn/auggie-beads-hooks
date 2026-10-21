@@ -1,0 +1,96 @@
+# Runs the Auggie Beads hook test suites. Copy this file into a project's
+# .github/workflows/ as it is: the path filter below names this file, so a
+# copy under the same name needs no edits. To merge the two jobs into an
+# existing workflow instead, change that filter to the workflow's own path.
+name: Auggie hooks
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Detect Auggie hook changes
+    runs-on: ubuntu-latest
+    outputs:
+      auggie_hooks: ${{ steps.diff.outputs.auggie_hooks }}
+    steps:
+      # Actions are pinned by commit.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      # The hook suites take about ten minutes per platform, so they run only
+      # when .augment/ or this workflow changes. A base that cannot be read
+      # (a manual run, a new branch, a force push) runs them.
+      - id: diff
+        env:
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          hooks=true
+          if git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
+            changed=$(git diff --name-only "$BASE" HEAD)
+            grep -qE '^(\.augment/|\.github/workflows/auggie-hooks\.yaml$)' <<<"$changed" ||
+              hooks=false
+          fi
+          echo "auggie_hooks=$hooks" >>"$GITHUB_OUTPUT"
+
+  auggie-hooks:
+    # Every suite stubs `bd` and runs in scratch directories, so no bead store
+    # is touched and `bd` need not be installed. macOS runs too: its /bin/bash
+    # is 3.2, which the hooks support.
+    name: Auggie hook tests (${{ matrix.os }})
+    needs: changes
+    if: needs.changes.outputs.auggie_hooks == 'true'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # The scanner parses commands with `shfmt --to-json`; jq and python3 are
+      # already on both runner images. Unpinned on purpose: apt and brew ship
+      # different shfmt versions, and the suites cover both.
+      - name: Install shfmt
+        run: |
+          if [ "$RUNNER_OS" = macOS ]; then
+            HOMEBREW_NO_AUTO_UPDATE=1 brew install shfmt
+          else
+            sudo apt-get update -y && sudo apt-get install -y shfmt
+          fi
+          shfmt --version
+
+      # settings.json runs the two entrypoints directly, so a lost executable
+      # bit disables them while `bash -n` stays green.
+      - name: Check hook syntax
+        run: |
+          rc=0
+          for f in .augment/hooks/beads-prime.sh .augment/hooks/beads-sync.sh; do
+            [ -x "$f" ] || { echo "ERROR: $f is not executable" >&2; rc=1; }
+          done
+          for f in .augment/hooks/*.sh .augment/hooks/lib/*.sh \
+            .augment/hooks/test/*.sh; do
+            bash -n "$f" || rc=1
+          done
+          python3 -m py_compile .augment/hooks/lib/command_scan.py || rc=1
+          exit "$rc"
+
+      # /bin/bash rather than bash: on macOS it is 3.2. The suites run the
+      # hooks under their own interpreter, so this covers the hooks as well.
+      - name: Run hook test suites
+        run: |
+          /bin/bash --version | head -1
+          /bin/bash .augment/hooks/test/classification_test.sh
+          /bin/bash .augment/hooks/test/lock_test.sh
+          /bin/bash .augment/hooks/test/prime_test.sh

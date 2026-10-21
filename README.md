@@ -143,6 +143,26 @@ jq -n --arg w "$PWD" '{hook_event_name: "SessionEnd", workspace_roots: [$w]}' |
 
 The second command syncs the store, and prints nothing when it succeeds.
 
+### Keeping copies in step
+
+A project that adopts the hooks holds its own copy, so a fix made in one copy
+reaches the others only by hand. This repository is the upstream for all of
+them:
+
+1. Make every change to `.augment/hooks/` here first, including a fix found
+   while working in a project's copy, with a test that fails without it.
+2. Run the three suites here, and open the pull request.
+3. Apply the same commit to each project's copy, typically with
+   `git format-patch` and `git apply`. Adjust only lines that differ there
+   for the project's own reasons, such as temporary-file prefixes.
+4. Run the three suites in each copy before pushing, and say in the commit
+   which upstream commit it ports.
+
+A review finding raised on a project's pull request is answered there, but
+fixed here first, so the copies stay identical apart from those adjusted
+lines. To see what a copy has drifted from, run `diff -r` between its
+`.augment/hooks/` and this repository's.
+
 ## Choosing where the store syncs
 
 Each store's `dolt.auto-push` setting decides whether the hook pushes. The

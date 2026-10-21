@@ -83,9 +83,11 @@ retried by a later invocation. The entry is removed once a sync of that store
 completes, or when the store no longer exists.
 
 A write the command runs in the background, after `&` or in a coprocess, can
-land after the hook has synced. Its external store is also recorded in the
-first root's `.beads/.augment-sync.async`, which only SessionEnd reads: it
-moves each store back into `.augment-sync.external` and syncs it.
+land after the hook has synced. Its external store is also recorded, with the
+session's `conversation_id`, in the first root's `.beads/.augment-sync.async`,
+which only SessionEnd reads. Each SessionEnd moves every store listed there
+back into `.augment-sync.external` and syncs it, then removes its own
+session's records once the registry holds them.
 
 The hook always exits 0. It reports problems as `beads:` warnings: on
 PostToolUse as context the agent sees with the tool result, on SessionEnd on

@@ -48,7 +48,8 @@ the workspace has no `.beads/`.
 ### PostToolUse and SessionEnd: `beads-sync.sh`
 
 The hook reads the event as JSON on stdin: `hook_event_name`,
-`workspace_roots`, `tool_name`, `tool_input.command` and `tool_input.cwd`.
+`workspace_roots`, `tool_name`, `tool_input.command`, `tool_input.cwd` and
+`tool_input.wait`.
 
 On **PostToolUse** for `launch-process`, it scans the command. Any `bd` call
 not known to be read-only counts as a write. The scanner also works out which
@@ -83,7 +84,8 @@ retried by a later invocation. The entry is removed once a sync of that store
 completes, or when the store no longer exists.
 
 A write the command runs in the background, after `&`, in a coprocess or in a
-process substitution, can land after the hook has synced. Its external store is also recorded, with the
+process substitution, can land after the hook has synced, as can any write in
+a `launch-process` call made with `wait: false`. Its external store is also recorded, with the
 session's `conversation_id`, in the first root's `.beads/.augment-sync.async`,
 which only SessionEnd reads. Each SessionEnd moves every store listed there
 back into `.augment-sync.external` and syncs it, then removes its own
@@ -327,10 +329,12 @@ and require `Auggie hook tests gate`:
 - A store the scanner cannot name is reported in a warning rather than
   synced: `bd -C "$X"` where `$X` is known only at run time, a plain `bd` in
   a directory the event did not report, or script run through `eval`.
-- Only `&`, `coproc` and process substitution count as background. A
-  wrapper that detaches its command, such as `setsid -f` or `sudo -b`, is
-  not recognised, and a background write still running when the session
-  ends is not waited for.
+- Only `&`, `coproc`, process substitution, a wrapper that detaches its
+  command, such as `setsid -f` or `sudo -b`, and a `launch-process` call
+  made with `wait: false` count as background. A `wait: true` call that
+  returns at `max_wait_seconds` with its command still running is not
+  recognised, and a background write still running when the session ends
+  is not waited for.
 - The push always targets the remote named `origin`.
 - The hooks add to, and do not replace, the git hook shims `bd init`
   installs under `.beads/hooks/`.

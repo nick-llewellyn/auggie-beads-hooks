@@ -340,8 +340,10 @@ and require `Auggie hook tests gate`:
   skips rule files that are symlinks. That rule carries the `PRIME.md` text
   only; `bd prime` adds the stored memories.
 - A store the scanner cannot name is reported in a warning rather than
-  synced: `bd -C "$X"` where `$X` is known only at run time, a plain `bd` in
-  a directory the event did not report, or script run through `eval`.
+  synced: `bd -C "$X"` where `$X` is known only at run time; an argument
+  known only at run time before `--`, as in `bd close "$ID"`, which may be
+  an option such as `--db=<path>`; a plain `bd` in a directory the event did
+  not report; or script run through `eval`.
 - Only `&`, `coproc`, process substitution, a wrapper that detaches its
   command, such as `setsid -f` or `sudo -b`, and a `launch-process` call
   made with `wait: false` count as background. A `wait: true` call that
@@ -364,7 +366,11 @@ and require `Auggie hook tests gate`:
   stays marked and is retried.
 - **`beads: a bead store that was written could not be resolved to a path
   ...`**: see [Limitations](#limitations), and commit (and push) that store
-  by hand.
+  by hand. If the command passed `bd` a value known only at run time, such
+  as an issue ID from an earlier `bd create`, put it after `--`, behind any
+  options (`bd close -- "$ID"`, `bd update --notes x -- "$ID"`). The scan
+  then reads it as an operand rather than a possible option, and names the
+  store.
 - **No Beads context at session start**: expected under Auggie CLI 0.36.0;
   see [Limitations](#limitations). Otherwise, check that the session runs
   under the Auggie CLI, that `.augment/hooks/*.sh` are executable, and that

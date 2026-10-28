@@ -3290,7 +3290,7 @@ class Scanner:
         finally:
             self.background -= 1
 
-    def tentative(self, fn):
+    def tentative(self, fn, origin=None):
         """Runs `fn` in a frame whose effects may or may not have happened.
 
         The body of a branch, a function call, or an `eval` runs in this shell,
@@ -3303,9 +3303,15 @@ class Scanner:
         it. One that never did leaves the cwd standing: `if t; then X=1; fi; bd
         close X`, launched from an external store, gave the cwd up and the
         store went unregistered for a branch that could not have moved it.
+
+        `origin` is a scope to start the frame from instead of this one, for
+        one of several alternatives that each start where the others did;
+        see `call_listed`. What the frame changed from it is unknown here
+        afterwards.
         """
         saved = self.scope
-        inner = saved.child()
+        base = saved if origin is None else origin
+        inner = base.child()
         self.scope = inner
         functions = dict(self.functions)
         possibly_unset = set(self.possibly_unset)
@@ -3328,28 +3334,28 @@ class Scanner:
         # `cd` drops an explicit PWD -- is unknown afterwards, in value and in
         # export state alike.
         missing = object()
-        for name in set(inner.assigns) | set(saved.assigns):
-            if saved.assigns.get(name, missing) != \
+        for name in set(inner.assigns) | set(base.assigns):
+            if base.assigns.get(name, missing) != \
                     inner.assigns.get(name, missing):
                 saved.assigns[name] = UNKNOWN
-        for name in set(inner.exported) | set(saved.exported):
-            if saved.exported.get(name, missing) != \
+        for name in set(inner.exported) | set(base.exported):
+            if base.exported.get(name, missing) != \
                     inner.exported.get(name, missing):
                 saved.exported[name] = UNKNOWN
-        if saved.allexport != inner.allexport:
+        if base.allexport != inner.allexport:
             saved.allexport = UNKNOWN
-        if saved.lastpipe != inner.lastpipe:
+        if base.lastpipe != inner.lastpipe:
             saved.lastpipe = UNKNOWN
-        if saved.monitor != inner.monitor:
+        if base.monitor != inner.monitor:
             saved.monitor = UNKNOWN
-        if saved.physical != inner.physical:
+        if base.physical != inner.physical:
             saved.physical = UNKNOWN
         # A frame that sealed its scope -- a `source`d file may export
         # anything -- leaves every name in doubt, not only those it touched:
         # `if t; then . ./select-store.sh; fi; bd close X` may run with a
         # BEADS_DIR the file set, where reading on unsealed took it for unset
         # and named the store the walk found.
-        if saved.sealed != inner.sealed:
+        if base.sealed != inner.sealed:
             saved.sealed = OPAQUE
         if inner.moved:
             saved.known = False
@@ -4063,21 +4069,24 @@ class Scanner:
         """Runs the call to `word`, a function this text defined.
 
         One an `unset -f` may have removed may also be gone by the call, and
-        the command then runs as it would with no function of that name. Both
-        are read, each as a frame that may or may not have run: after `g() {
-        cd /ext; }; if t; then unset -f g; fi`, `g; bd close X` may write
-        /ext's store, so the cwd after the call is unknown, and after `bd() {
-        command bd -C /ext close X; }; t && unset -f bd`, `bd close X` writes
-        /ext or the store it walks up to.
+        the command then runs as `call` runs one with no function of that
+        name, its PWD read as given. Both are read, each from the state
+        before the call and as a frame that may or may not have run: after
+        `g() { cd /ext; }; if t; then unset -f g; fi`, `g; bd close X` may
+        write /ext's store, so the cwd after the call is unknown, and after
+        `bd() { cd /ext; command bd close X; }; t && unset -f bd`, `bd close
+        X` writes /ext or the store it walks up to from where it started.
         """
         possibly_unset = word in self.possibly_unset
+        before = self.scope.child() if possibly_unset else None
         self.call_function(word, self.prefix_seed(cmd))
         if not possibly_unset:
             return
         entry = self.functions.pop(word, None)
         try:
-            self.tentative(lambda: self.dispatch(cmd, fields, start, split,
-                                                 conditional, follows, None))
+            self.tentative(lambda: self.run_command(cmd, fields, start, split,
+                                                    conditional, follows),
+                           origin=before)
         finally:
             if entry is not None and word not in self.functions:
                 self.functions[word] = entry
@@ -4233,6 +4242,13 @@ class Scanner:
         unread = self.functions_sealed and (
             first is UNKNOWN or (first not in self.functions and
                                  first not in ("builtin", "command")))
+        self.run_command(cmd, fields, start, split, conditional, follows)
+        if unread:
+            self.seal_sourced()
+
+    def run_command(self, cmd, fields, start, split, conditional, follows):
+        """Runs the command `fields` spell where its wrappers put it, and with
+        the PWD it was given; see `call`."""
         # A wrapper may run the command in a directory of its own, and which
         # store `bd` selects turns on the directory it runs in. Applied here,
         # once, around every reader below rather than at each of them: the
@@ -4281,8 +4297,6 @@ class Scanner:
         else:
             self.dispatch(cmd, fields, start, split, conditional, follows,
                           None)
-        if unread:
-            self.seal_sourced()
 
     def wrapper_pwd(self, cmd, args, end, cwd, posix=False):
         """The directory the wrappers moved the command to, as it names it,

@@ -2103,6 +2103,9 @@ check_unresolved "cs_u() { true || return; unset -f cs_f; }; cs_f() { cd $CD/oth
 check_target "$BASE/store" "cs_f() { cd $CD/other; }; unset -f cs_f; cs_f; bd -C store close CHR-1"
 check_target "$BASE/store" "cs_f() { cd $CD/other; }; true && unset -f cs_f; cs_f() { :; }; cs_f; bd -C store close CHR-1"
 check_target "/tmp/ext $BASE/store" "bd() { command bd -C /tmp/ext close CHR-1; }; true && unset -f bd; bd -C store close CHR-1"
+# Each way starts from the state before the call, so the body's `cd` does not
+# move the walk the program makes.
+check_target "/tmp/ext $STORE" "cd $STORE; bd() { cd $CD/other; command bd -C /tmp/ext close CHR-1; }; true && unset -f bd; bd close CHR-1"
 # A subshell starts with this shell's functions. A new bash process starts
 # with those exported to it, which are not read: after any definition it may
 # have any of them, so a command it names first may be one, and the state
@@ -2963,6 +2966,8 @@ check_target "$WS_DIR" "bd() { :; }; cd $EXT/child; export PWD=$WS_DIR/link; com
 check_target "$WS_DIR" "bd() { :; }; cd $EXT/child; PWD=$WS_DIR/link command bd -C .. close CHR-1"
 check_target "$WS_DIR" "bd() { :; }; cd $EXT/child; env PWD=$WS_DIR/link bd -C .. close CHR-1"
 check skip "bd() { :; }; cd $EXT/child; export PWD=$WS_DIR/link; bd -C .. close CHR-1"
+# One an `unset -f` may have removed may be the program by then, which does.
+check_target "$WS_DIR" "bd() { :; }; true && unset -f bd; cd $EXT/child; export PWD=$WS_DIR/link; bd -C .. close CHR-1"
 # Every shell sets PWD as it starts, and exports it, so a child of one keeps
 # the spelling a `cd` gave it even in a cleared environment; a shell that
 # inherited no PWD naming its directory starts from the physical path.

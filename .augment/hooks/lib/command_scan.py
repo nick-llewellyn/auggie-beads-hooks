@@ -1601,6 +1601,9 @@ class Scanner:
         # first may be a function it does not list; see `seal_opaque` and
         # `imported_functions`.
         self.functions_sealed = False
+        # The functions an `unset -f` may or may not have removed, which are
+        # kept in the table; see `call_listed`.
+        self.possibly_unset = set()
         # The variables unset, and the number of seals, so far; see
         # `call_function`.
         self.unset_names = set()
@@ -3252,11 +3255,13 @@ class Scanner:
         saved = self.scope
         functions = self.functions
         sealed = self.functions_sealed
+        possibly_unset = self.possibly_unset
         unset_names = self.unset_names
         seals = self.seals
         leader = self.leader
         self.scope = saved.child()
         self.functions = dict(functions)
+        self.possibly_unset = set(possibly_unset)
         self.unset_names = set()
         if leader is EXEC_ONLY:
             self.leader = False
@@ -3266,6 +3271,7 @@ class Scanner:
             self.scope = saved
             self.functions = functions
             self.functions_sealed = sealed
+            self.possibly_unset = possibly_unset
             self.unset_names = unset_names
             self.seals = seals
             self.leader = leader
@@ -3301,10 +3307,23 @@ class Scanner:
         saved = self.scope
         inner = saved.child()
         self.scope = inner
+        functions = dict(self.functions)
+        possibly_unset = set(self.possibly_unset)
+        seals = self.seals
         try:
             fn()
         finally:
             self.scope = saved
+        # A function the frame unset may still be defined after it, as after
+        # an `unset -f` on one branch, so it is put back and read both ways;
+        # see `call_listed`. One it may have defined anew stays defined. A
+        # frame that sealed has put the whole table in doubt already.
+        if self.seals == seals:
+            for name, entry in functions.items():
+                if name not in self.functions:
+                    self.functions[name] = entry
+                    self.possibly_unset.add(name)
+            self.possibly_unset |= possibly_unset & set(self.functions)
         # A name the frame touched -- assigned, exported, unset, or dropped as
         # `cd` drops an explicit PWD -- is unknown afterwards, in value and in
         # export state alike.
@@ -3423,6 +3442,7 @@ class Scanner:
             if functions is not None:
                 self.functions = {}
                 self.functions_sealed = functions
+                self.possibly_unset = set()
             if startup:
                 self.seal_sourced()
             outer = self.text
@@ -3603,6 +3623,7 @@ class Scanner:
         self.scope.sealed = OPAQUE
         self.functions = {}
         self.functions_sealed = True
+        self.possibly_unset = set()
         self.seals += 1
         if cwd:
             self.leave_cwd()
@@ -3941,6 +3962,7 @@ class Scanner:
         if cmd.get("Name"):
             name = cmd["Name"]["Value"]
             self.functions[name] = (body, self.text, self.raw)
+            self.possibly_unset.discard(name)
 
         def run():
             # Scanned here too, and with the cwd unknown. A definition that is
@@ -4035,6 +4057,30 @@ class Scanner:
         finally:
             self.depth -= 1
             self.calling.discard(name)
+
+    def call_listed(self, cmd, fields, start, split, conditional, follows,
+                    word):
+        """Runs the call to `word`, a function this text defined.
+
+        One an `unset -f` may have removed may also be gone by the call, and
+        the command then runs as it would with no function of that name. Both
+        are read, each as a frame that may or may not have run: after `g() {
+        cd /ext; }; if t; then unset -f g; fi`, `g; bd close X` may write
+        /ext's store, so the cwd after the call is unknown, and after `bd() {
+        command bd -C /ext close X; }; t && unset -f bd`, `bd close X` writes
+        /ext or the store it walks up to.
+        """
+        possibly_unset = word in self.possibly_unset
+        self.call_function(word, self.prefix_seed(cmd))
+        if not possibly_unset:
+            return
+        entry = self.functions.pop(word, None)
+        try:
+            self.tentative(lambda: self.dispatch(cmd, fields, start, split,
+                                                 conditional, follows, None))
+        finally:
+            if entry is not None and word not in self.functions:
+                self.functions[word] = entry
 
     def decl(self, cmd, conditional):
         """Records the assignments an assignment builtin makes.
@@ -4381,7 +4427,8 @@ class Scanner:
         # writes /ext. No builtin is named by a path, so one this text
         # defined is called before the path is read as a program.
         if start == 0 and name != word and word in self.functions:
-            self.call_function(word, self.prefix_seed(cmd))
+            self.call_listed(cmd, fields, start, split, conditional, follows,
+                             word)
             return
         if name != word and name in SHELL_STATE_WORDS:
             return
@@ -4464,7 +4511,8 @@ class Scanner:
         # and every other wrapper run a program, so `bd() { command bd -C /ext
         # close X; }; bd` writes /ext.
         if start == 0 and word in self.functions:
-            self.call_function(word, self.prefix_seed(cmd))
+            self.call_listed(cmd, fields, start, split, conditional, follows,
+                             word)
             return
 
         if name != "bd":
@@ -4936,7 +4984,8 @@ class Scanner:
         name this scan cannot read may be any name, so every value and every
         attribute is in doubt after it -- the scope is sealed opaque, as under
         a wrapper whose effect cannot be read. On a path the shell may not
-        take, what was unset is unknown rather than gone.
+        take, what was unset is unknown rather than gone: a function stays in
+        the table, possibly unset; see `call_listed`.
         """
         functions = False
         names = []
@@ -4954,7 +5003,11 @@ class Scanner:
             names.append(word)
         for name in names:
             if functions:
-                self.functions.pop(name, None)
+                if conditional and name in self.functions:
+                    self.possibly_unset.add(name)
+                else:
+                    self.functions.pop(name, None)
+                    self.possibly_unset.discard(name)
                 continue
             # bash refuses to unset its readonly SHELLOPTS, which still
             # carries its options to a child; see `carried_option`.

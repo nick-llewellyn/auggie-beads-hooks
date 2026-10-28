@@ -2093,6 +2093,16 @@ check_unresolved 'cs_f; cs_f() { bd -C store close CHR-1; }'
 check_unresolved "cs_f() { cd $CD/other; }; bash -l -c true; cs_f; bd -C store close CHR-1"
 check_unresolved "cs_f() { cd $CD/other; }; (unset -f cs_f); cs_f; bd -C store close CHR-1"
 check_target "$BASE/store" "(cs_f() { cd $CD/other; }); cs_f; bd -C store close CHR-1"
+# An `unset -f` on a path the shell may not take may leave the function
+# defined, so the call may still run the body; one on every path removes it.
+# The command may then also run with no function of that name, which is read
+# as well.
+check_unresolved "cs_f() { cd $CD/other; }; if true; then unset -f cs_f; fi; cs_f; bd -C store close CHR-1"
+check_unresolved "cs_f() { cd $CD/other; }; true && unset -f cs_f; cs_f; bd -C store close CHR-1"
+check_unresolved "cs_u() { true || return; unset -f cs_f; }; cs_f() { cd $CD/other; }; cs_u; cs_f; bd -C store close CHR-1"
+check_target "$BASE/store" "cs_f() { cd $CD/other; }; unset -f cs_f; cs_f; bd -C store close CHR-1"
+check_target "$BASE/store" "cs_f() { cd $CD/other; }; true && unset -f cs_f; cs_f() { :; }; cs_f; bd -C store close CHR-1"
+check_target "/tmp/ext $BASE/store" "bd() { command bd -C /tmp/ext close CHR-1; }; true && unset -f bd; bd -C store close CHR-1"
 # A subshell starts with this shell's functions. A new bash process starts
 # with those exported to it, which are not read: after any definition it may
 # have any of them, so a command it names first may be one, and the state

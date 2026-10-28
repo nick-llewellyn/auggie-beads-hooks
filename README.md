@@ -238,6 +238,12 @@ each write to the database's history.
    port.
 
 Further clones on the same machine share the database and need no `bd init`.
+Git does not copy `core.hooksPath` into a clone, so if the project tracks the
+`bd` hook shims in `.beads/hooks/`, point each further clone at them once:
+
+```bash
+git config core.hooksPath .beads/hooks
+```
 
 ## Git ignores for `.augment-sync.*` state
 

@@ -234,6 +234,10 @@ SHELL_LONG_NOARG = {"--noprofile", "--norc", "--posix", "--login",
 # does not know, and runs neither a startup file nor the script: `bash
 # --interactive -c '...'` exits 2 at once.
 SHELL_ZSH_LONG = {"--no-rcs", "--no-globalrcs", "--interactive", "--emulate"}
+# Where zsh's global zshenv lives, which it runs before any script, `-f` or
+# not. The place is set when zsh is built: /etc for most builds, /etc/zsh for
+# Debian's.
+ZSH_GLOBAL_ZSHENV = ("/etc/zshenv", "/etc/zsh/zshenv")
 
 # `bd`'s own global options that consume the word after them. The verb is the
 # first operand that is not an option, so an option's value must be stepped
@@ -5349,8 +5353,14 @@ class Scanner:
         BASH_ENV names, unless privileged or in POSIX mode. So
         `BASH_ENV=/tmp/select-store.sh bash -c 'bd close X'` writes whatever
         store that file exports, and what it does is as unknown as a
-        `source`d file's; see `sub_scan`. bash as `sh` reads none of them for
-        a `-c` script, and other shells are not read for theirs.
+        `source`d file's; see `sub_scan`.
+
+        zsh reads its global zshenv before any script, `-f` or not, and then,
+        unless `-f`, `.zshenv` from `$ZDOTDIR` or `$HOME`; `-i` and `-l` add
+        more. So `ZDOTDIR=/tmp/z zsh -c 'bd close X'` writes whatever store
+        `/tmp/z/.zshenv` selects, and only a `zsh -f` where no global zshenv
+        exists, at any place in `ZSH_GLOBAL_ZSHENV`, runs none. The other
+        shells are read in `posix_startup_runs`.
 
         Each control is read as an option, where it stands as one and as the
         last word on it says: `bash --rcfile --posix -c ...` names a file
@@ -5369,8 +5379,14 @@ class Scanner:
         A wrapper may make it a login shell too, by the name it runs it
         under; see `argv0_login`.
         """
-        if bash_kind(args[start].value) is not True:
-            return False
+        name = args[start].value.rsplit("/", 1)[-1]
+        if name == "zsh":
+            if self.shell_option(words, "f", "no-rcs") is not True:
+                return True
+            return any(os.path.exists(path) for path in ZSH_GLOBAL_ZSHENV)
+        if bash_kind(name) is not True:
+            return self.posix_startup_runs(cmd, args, start, words, name,
+                                           interactive)
         login = self.shell_option(words, "l", "login")
         if login is False:
             login = self.argv0_login(args, start)
@@ -5411,6 +5427,33 @@ class Scanner:
                 args[j].value.rsplit("/", 1)[-1] == "sudo" for j in found):
             return False
         return env is not None and env != ""
+
+    def posix_startup_runs(self, cmd, args, start, words, name, interactive):
+        """Whether `sh`, `dash`, `ksh` or `mksh` may run a startup file before
+        its `-c` script.
+
+        A login shell reads the profile, unless bash as `sh` is told
+        `--noprofile`, which the others refuse. An interactive one reads the
+        file ENV names, as dash and bash as `sh` do: `ENV=/tmp/s.sh sh -i -c
+        'bd close X'` runs it first. ksh and mksh read `~/.kshrc` or
+        `~/.mkshrc` in its place when ENV is unset, though not when it is set
+        and empty. A shell that is neither reads none of them, so
+        `BASH_ENV=/tmp/s.sh sh -c ...` runs no file.
+        """
+        login = self.shell_option(words, "l", "login")
+        if login is False:
+            login = self.argv0_login(args, start)
+        if login is not False and \
+                self.shell_option(words, "", "noprofile") is not True:
+            return True
+        if interactive is False:
+            return False
+        if interactive is UNKNOWN:
+            return True
+        env = self.command_env(cmd, args, start, "ENV")
+        if env is None:
+            return name in ("ksh", "mksh")
+        return env is UNKNOWN or bool(env)
 
     def argv0_login(self, args, start):
         """Whether the wrapper that runs the shell at `args[start]` names it

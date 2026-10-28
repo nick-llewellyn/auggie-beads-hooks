@@ -43,11 +43,13 @@ existing one.
 Runs `bd prime` from `$AUGMENT_PROJECT_DIR`, falling back to the current
 directory, and prints the result. It changes directory rather than passing
 `-C`, because `bd -C <dir> prime` reads `.beads/PRIME.md` from the current
-directory's store when that has one (bd 1.3.2). Auggie's hooks documentation
-says SessionStart output is added to the session context, but Auggie CLI
-0.36.0 discards it; see [Limitations](#limitations). If `bd prime` fails, the
-hook prints a `beads:` notice instead. It exits 0 in every case, and does
-nothing when `bd` is missing or the workspace has no `.beads/`.
+directory's store when that has one (bd 1.3.2). It looks `bd` up before
+changing directory, so one found through a relative `PATH` entry still runs.
+Auggie's hooks documentation says SessionStart output is added to the
+session context, but Auggie CLI 0.36.0 discards it; see
+[Limitations](#limitations). If `bd prime` fails, the hook prints a `beads:`
+notice instead. It exits 0 in every case, and does nothing when `bd` is
+missing or the workspace has no `.beads/`.
 
 ### PostToolUse and SessionEnd: `beads-sync.sh`
 

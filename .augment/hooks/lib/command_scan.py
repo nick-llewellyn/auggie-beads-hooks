@@ -4076,6 +4076,12 @@ class Scanner:
         write /ext's store, so the cwd after the call is unknown, and after
         `bd() { cd /ext; command bd close X; }; t && unset -f bd`, `bd close
         X` writes /ext or the store it walks up to from where it started.
+
+        Where it was gone it is still gone after the call, whatever the body
+        defined, so it stays possibly unset; `tentative` does not keep the
+        mark for a body that sealed. After `bd() { . ./defs.sh; bd() { :;
+        }; }; t && unset -f bd; bd list`, `bd -C /ext close X` may write
+        /ext.
         """
         possibly_unset = word in self.possibly_unset
         before = self.scope.child() if possibly_unset else None
@@ -4090,6 +4096,7 @@ class Scanner:
         finally:
             if entry is not None and word not in self.functions:
                 self.functions[word] = entry
+                self.possibly_unset.add(word)
 
     def decl(self, cmd, conditional):
         """Records the assignments an assignment builtin makes.

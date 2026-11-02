@@ -2106,6 +2106,10 @@ check_target "/tmp/ext $BASE/store" "bd() { command bd -C /tmp/ext close CHR-1; 
 # Each way starts from the state before the call, so the body's `cd` does not
 # move the walk the program makes.
 check_target "/tmp/ext $STORE" "cd $STORE; bd() { cd $CD/other; command bd -C /tmp/ext close CHR-1; }; true && unset -f bd; bd close CHR-1"
+# Where it was removed it is still removed after the call, even when the body
+# sources a file and defines it anew; where it was not, the new one runs.
+check_target "/tmp/ext" "bd() { . ./defs.sh; bd() { :; }; }; true && unset -f bd; bd list; bd -C /tmp/ext close CHR-1"
+check skip "bd() { . ./defs.sh; bd() { :; }; }; bd list; bd -C /tmp/ext close CHR-1"
 # A subshell starts with this shell's functions. A new bash process starts
 # with those exported to it, which are not read: after any definition it may
 # have any of them, so a command it names first may be one, and the state

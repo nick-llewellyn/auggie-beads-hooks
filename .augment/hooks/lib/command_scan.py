@@ -4082,9 +4082,14 @@ class Scanner:
         mark for a body that sealed. After `bd() { . ./defs.sh; bd() { :;
         }; }; t && unset -f bd; bd list`, `bd -C /ext close X` may write
         /ext.
+
+        A function the body defined anew exists only where the body ran, so
+        it is possibly unset after the call: after `g() { bd() { :; }; }; t
+        && unset -f g; g`, `bd -C /ext close X` may write /ext.
         """
         possibly_unset = word in self.possibly_unset
         before = self.scope.child() if possibly_unset else None
+        defined = set(self.functions) if possibly_unset else None
         self.call_function(word, self.prefix_seed(cmd))
         if not possibly_unset:
             return
@@ -4097,6 +4102,7 @@ class Scanner:
             if entry is not None and word not in self.functions:
                 self.functions[word] = entry
                 self.possibly_unset.add(word)
+            self.possibly_unset |= set(self.functions) - defined
 
     def decl(self, cmd, conditional):
         """Records the assignments an assignment builtin makes.

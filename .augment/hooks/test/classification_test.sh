@@ -2110,6 +2110,11 @@ check_target "/tmp/ext $STORE" "cd $STORE; bd() { cd $CD/other; command bd -C /t
 # sources a file and defines it anew; where it was not, the new one runs.
 check_target "/tmp/ext" "bd() { . ./defs.sh; bd() { :; }; }; true && unset -f bd; bd list; bd -C /tmp/ext close CHR-1"
 check skip "bd() { . ./defs.sh; bd() { :; }; }; bd list; bd -C /tmp/ext close CHR-1"
+# A function the body defines anew exists only where the body ran, so where
+# the function was removed the program runs. Where the body sourced a file,
+# `bd` may also be a function that file defined.
+check_target "/tmp/ext" "cs_g() { bd() { :; }; }; true && unset -f cs_g; cs_g; bd -C /tmp/ext close CHR-1"
+check_target_unresolved "/tmp/ext" "cs_g() { . ./defs.sh; bd() { :; }; }; true && unset -f cs_g; cs_g; bd -C /tmp/ext close CHR-1"
 # A subshell starts with this shell's functions. A new bash process starts
 # with those exported to it, which are not read: after any definition it may
 # have any of them, so a command it names first may be one, and the state

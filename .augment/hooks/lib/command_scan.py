@@ -1620,6 +1620,9 @@ class Scanner:
         # first may be a function it does not list; see `seal_opaque` and
         # `imported_functions`.
         self.functions_sealed = False
+        # The functions an `unset -f` may or may not have removed, which are
+        # kept in the table; see `call_listed`.
+        self.possibly_unset = set()
         # The variables unset, and the number of seals, so far; see
         # `call_function`.
         self.unset_names = set()
@@ -3315,11 +3318,13 @@ class Scanner:
         saved = self.scope
         functions = self.functions
         sealed = self.functions_sealed
+        possibly_unset = self.possibly_unset
         unset_names = self.unset_names
         seals = self.seals
         leader = self.leader
         self.scope = saved.child()
         self.functions = dict(functions)
+        self.possibly_unset = set(possibly_unset)
         self.unset_names = set()
         if leader is EXEC_ONLY:
             self.leader = False
@@ -3329,6 +3334,7 @@ class Scanner:
             self.scope = saved
             self.functions = functions
             self.functions_sealed = sealed
+            self.possibly_unset = possibly_unset
             self.unset_names = unset_names
             self.seals = seals
             self.leader = leader
@@ -3347,7 +3353,7 @@ class Scanner:
         finally:
             self.background -= 1
 
-    def tentative(self, fn):
+    def tentative(self, fn, origin=None):
         """Runs `fn` in a frame whose effects may or may not have happened.
 
         The body of a branch, a function call, or an `eval` runs in this shell,
@@ -3360,40 +3366,59 @@ class Scanner:
         it. One that never did leaves the cwd standing: `if t; then X=1; fi; bd
         close X`, launched from an external store, gave the cwd up and the
         store went unregistered for a branch that could not have moved it.
+
+        `origin` is a scope to start the frame from instead of this one, for
+        one of several alternatives that each start where the others did;
+        see `call_listed`. What the frame changed from it is unknown here
+        afterwards.
         """
         saved = self.scope
-        inner = saved.child()
+        base = saved if origin is None else origin
+        inner = base.child()
         self.scope = inner
+        functions = dict(self.functions)
+        possibly_unset = set(self.possibly_unset)
+        seals = self.seals
         try:
             fn()
         finally:
             self.scope = saved
+        # A function the frame unset may still be defined after it, as after
+        # an `unset -f` on one branch, so it is put back and read both ways;
+        # see `call_listed`. One it may have defined anew stays defined. A
+        # frame that sealed has put the whole table in doubt already.
+        if self.seals == seals:
+            for name, entry in functions.items():
+                if name not in self.functions:
+                    self.functions[name] = entry
+                    self.possibly_unset.add(name)
+            self.possibly_unset |= possibly_unset & set(self.functions)
         # A name the frame touched -- assigned, exported, unset, or dropped as
         # `cd` drops an explicit PWD -- is unknown afterwards, in value and in
         # export state alike.
         missing = object()
-        for name in set(inner.assigns) | set(saved.assigns):
-            if saved.assigns.get(name, missing) != \
+        for name in set(inner.assigns) | set(base.assigns):
+            if base.assigns.get(name, missing) != \
                     inner.assigns.get(name, missing):
                 saved.assigns[name] = UNKNOWN
-        for name in set(inner.exported) | set(saved.exported):
-            if saved.exported.get(name, missing) != \
+        for name in set(inner.exported) | set(base.exported):
+            if base.exported.get(name, missing) != \
                     inner.exported.get(name, missing):
                 saved.exported[name] = UNKNOWN
-        if saved.allexport != inner.allexport:
+        if base.allexport != inner.allexport:
             saved.allexport = UNKNOWN
-        if saved.lastpipe != inner.lastpipe:
+        if base.lastpipe != inner.lastpipe:
             saved.lastpipe = UNKNOWN
-        if saved.monitor != inner.monitor:
+        if base.monitor != inner.monitor:
             saved.monitor = UNKNOWN
-        if saved.physical != inner.physical:
+        if base.physical != inner.physical:
             saved.physical = UNKNOWN
         # A frame that sealed its scope -- a `source`d file may export
         # anything -- leaves every name in doubt, not only those it touched:
         # `if t; then . ./select-store.sh; fi; bd close X` may run with a
         # BEADS_DIR the file set, where reading on unsealed took it for unset
         # and named the store the walk found.
-        if saved.sealed != inner.sealed:
+        if base.sealed != inner.sealed:
             saved.sealed = OPAQUE
         if inner.moved:
             saved.known = False
@@ -3486,6 +3511,7 @@ class Scanner:
             if functions is not None:
                 self.functions = {}
                 self.functions_sealed = functions
+                self.possibly_unset = set()
             if startup:
                 self.seal_sourced()
             outer = self.text
@@ -3666,6 +3692,7 @@ class Scanner:
         self.scope.sealed = OPAQUE
         self.functions = {}
         self.functions_sealed = True
+        self.possibly_unset = set()
         self.seals += 1
         if cwd:
             self.leave_cwd()
@@ -4004,6 +4031,7 @@ class Scanner:
         if cmd.get("Name"):
             name = cmd["Name"]["Value"]
             self.functions[name] = (body, self.text, self.raw)
+            self.possibly_unset.discard(name)
 
         def run():
             # Scanned here too, and with the cwd unknown. A definition that is
@@ -4098,6 +4126,46 @@ class Scanner:
         finally:
             self.depth -= 1
             self.calling.discard(name)
+
+    def call_listed(self, cmd, fields, start, split, conditional, follows,
+                    word):
+        """Runs the call to `word`, a function this text defined.
+
+        One an `unset -f` may have removed may also be gone by the call, and
+        the command then runs as `call` runs one with no function of that
+        name, its PWD read as given. Both are read, each from the state
+        before the call and as a frame that may or may not have run: after
+        `g() { cd /ext; }; if t; then unset -f g; fi`, `g; bd close X` may
+        write /ext's store, so the cwd after the call is unknown, and after
+        `bd() { cd /ext; command bd close X; }; t && unset -f bd`, `bd close
+        X` writes /ext or the store it walks up to from where it started.
+
+        Where it was gone it is still gone after the call, whatever the body
+        defined, so it stays possibly unset; `tentative` does not keep the
+        mark for a body that sealed. After `bd() { . ./defs.sh; bd() { :;
+        }; }; t && unset -f bd; bd list`, `bd -C /ext close X` may write
+        /ext.
+
+        A function the body defined anew exists only where the body ran, so
+        it is possibly unset after the call: after `g() { bd() { :; }; }; t
+        && unset -f g; g`, `bd -C /ext close X` may write /ext.
+        """
+        possibly_unset = word in self.possibly_unset
+        before = self.scope.child() if possibly_unset else None
+        defined = set(self.functions) if possibly_unset else None
+        self.call_function(word, self.prefix_seed(cmd))
+        if not possibly_unset:
+            return
+        entry = self.functions.pop(word, None)
+        try:
+            self.tentative(lambda: self.run_command(cmd, fields, start, split,
+                                                    conditional, follows),
+                           origin=before)
+        finally:
+            if entry is not None and word not in self.functions:
+                self.functions[word] = entry
+                self.possibly_unset.add(word)
+            self.possibly_unset |= set(self.functions) - defined
 
     def decl(self, cmd, conditional):
         """Records the assignments an assignment builtin makes.
@@ -4250,6 +4318,13 @@ class Scanner:
         unread = self.functions_sealed and (
             first is UNKNOWN or (first not in self.functions and
                                  first not in ("builtin", "command")))
+        self.run_command(cmd, fields, start, split, conditional, follows)
+        if unread:
+            self.seal_sourced()
+
+    def run_command(self, cmd, fields, start, split, conditional, follows):
+        """Runs the command `fields` spell where its wrappers put it, and with
+        the PWD it was given; see `call`."""
         # A wrapper may run the command in a directory of its own, and which
         # store `bd` selects turns on the directory it runs in. Applied here,
         # once, around every reader below rather than at each of them: the
@@ -4298,8 +4373,6 @@ class Scanner:
         else:
             self.dispatch(cmd, fields, start, split, conditional, follows,
                           None)
-        if unread:
-            self.seal_sourced()
 
     def wrapper_pwd(self, cmd, args, end, cwd, posix=False):
         """The directory the wrappers moved the command to, as it names it,
@@ -4444,7 +4517,8 @@ class Scanner:
         # writes /ext. No builtin is named by a path, so one this text
         # defined is called before the path is read as a program.
         if start == 0 and name != word and word in self.functions:
-            self.call_function(word, self.prefix_seed(cmd))
+            self.call_listed(cmd, fields, start, split, conditional, follows,
+                             word)
             return
         if name != word and name in SHELL_STATE_WORDS:
             return
@@ -4527,7 +4601,8 @@ class Scanner:
         # and every other wrapper run a program, so `bd() { command bd -C /ext
         # close X; }; bd` writes /ext.
         if start == 0 and word in self.functions:
-            self.call_function(word, self.prefix_seed(cmd))
+            self.call_listed(cmd, fields, start, split, conditional, follows,
+                             word)
             return
 
         if name != "bd":
@@ -4999,7 +5074,8 @@ class Scanner:
         name this scan cannot read may be any name, so every value and every
         attribute is in doubt after it -- the scope is sealed opaque, as under
         a wrapper whose effect cannot be read. On a path the shell may not
-        take, what was unset is unknown rather than gone.
+        take, what was unset is unknown rather than gone: a function stays in
+        the table, possibly unset; see `call_listed`.
         """
         functions = False
         names = []
@@ -5017,7 +5093,11 @@ class Scanner:
             names.append(word)
         for name in names:
             if functions:
-                self.functions.pop(name, None)
+                if conditional and name in self.functions:
+                    self.possibly_unset.add(name)
+                else:
+                    self.functions.pop(name, None)
+                    self.possibly_unset.discard(name)
                 continue
             # bash refuses to unset its readonly SHELLOPTS, which still
             # carries its options to a child; see `carried_option`.

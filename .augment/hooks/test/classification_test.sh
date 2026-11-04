@@ -2144,6 +2144,28 @@ check_unresolved 'cs_f; cs_f() { bd -C store close CHR-1; }'
 check_unresolved "cs_f() { cd $CD/other; }; bash -l -c true; cs_f; bd -C store close CHR-1"
 check_unresolved "cs_f() { cd $CD/other; }; (unset -f cs_f); cs_f; bd -C store close CHR-1"
 check_target "$BASE/store" "(cs_f() { cd $CD/other; }); cs_f; bd -C store close CHR-1"
+# An `unset -f` on a path the shell may not take may leave the function
+# defined, so the call may still run the body; one on every path removes it.
+# The command may then also run with no function of that name, which is read
+# as well.
+check_unresolved "cs_f() { cd $CD/other; }; if true; then unset -f cs_f; fi; cs_f; bd -C store close CHR-1"
+check_unresolved "cs_f() { cd $CD/other; }; true && unset -f cs_f; cs_f; bd -C store close CHR-1"
+check_unresolved "cs_u() { true || return; unset -f cs_f; }; cs_f() { cd $CD/other; }; cs_u; cs_f; bd -C store close CHR-1"
+check_target "$BASE/store" "cs_f() { cd $CD/other; }; unset -f cs_f; cs_f; bd -C store close CHR-1"
+check_target "$BASE/store" "cs_f() { cd $CD/other; }; true && unset -f cs_f; cs_f() { :; }; cs_f; bd -C store close CHR-1"
+check_target "/tmp/ext $BASE/store" "bd() { command bd -C /tmp/ext close CHR-1; }; true && unset -f bd; bd -C store close CHR-1"
+# Each way starts from the state before the call, so the body's `cd` does not
+# move the walk the program makes.
+check_target "/tmp/ext $STORE" "cd $STORE; bd() { cd $CD/other; command bd -C /tmp/ext close CHR-1; }; true && unset -f bd; bd close CHR-1"
+# Where it was removed it is still removed after the call, even when the body
+# sources a file and defines it anew; where it was not, the new one runs.
+check_target "/tmp/ext" "bd() { . ./defs.sh; bd() { :; }; }; true && unset -f bd; bd list; bd -C /tmp/ext close CHR-1"
+check skip "bd() { . ./defs.sh; bd() { :; }; }; bd list; bd -C /tmp/ext close CHR-1"
+# A function the body defines anew exists only where the body ran, so where
+# the function was removed the program runs. Where the body sourced a file,
+# `bd` may also be a function that file defined.
+check_target "/tmp/ext" "cs_g() { bd() { :; }; }; true && unset -f cs_g; cs_g; bd -C /tmp/ext close CHR-1"
+check_target_unresolved "/tmp/ext" "cs_g() { . ./defs.sh; bd() { :; }; }; true && unset -f cs_g; cs_g; bd -C /tmp/ext close CHR-1"
 # A subshell starts with this shell's functions. A new bash process starts
 # with those exported to it, which are not read: after any definition it may
 # have any of them, so a command it names first may be one, and the state
@@ -3004,6 +3026,8 @@ check_target "$WS_DIR" "bd() { :; }; cd $EXT/child; export PWD=$WS_DIR/link; com
 check_target "$WS_DIR" "bd() { :; }; cd $EXT/child; PWD=$WS_DIR/link command bd -C .. close CHR-1"
 check_target "$WS_DIR" "bd() { :; }; cd $EXT/child; env PWD=$WS_DIR/link bd -C .. close CHR-1"
 check skip "bd() { :; }; cd $EXT/child; export PWD=$WS_DIR/link; bd -C .. close CHR-1"
+# One an `unset -f` may have removed may be the program by then, which does.
+check_target "$WS_DIR" "bd() { :; }; true && unset -f bd; cd $EXT/child; export PWD=$WS_DIR/link; bd -C .. close CHR-1"
 # Every shell sets PWD as it starts, and exports it, so a child of one keeps
 # the spelling a `cd` gave it even in a cleared environment; a shell that
 # inherited no PWD naming its directory starts from the physical path.

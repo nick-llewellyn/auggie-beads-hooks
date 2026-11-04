@@ -234,6 +234,13 @@ SHELL_LONG_NOARG = {"--noprofile", "--norc", "--posix", "--login",
 # does not know, and runs neither a startup file nor the script: `bash
 # --interactive -c '...'` exits 2 at once.
 SHELL_ZSH_LONG = {"--no-rcs", "--no-globalrcs", "--interactive", "--emulate"}
+# Where zsh's global zshenv lives, which it runs before any script, `-f` or
+# not. The place is set when zsh is built: /etc for most builds, /etc/zsh for
+# Debian's.
+ZSH_GLOBAL_ZSHENV = ("/etc/zshenv", "/etc/zsh/zshenv")
+# The file an interactive ksh93 reads before ENV, whatever ENV says, as builds
+# with SHOPT_SYSRC, the default, do.
+KSH_SYSTEM_RC = "/etc/ksh.kshrc"
 
 # `bd`'s own global options that consume the word after them. The verb is the
 # first operand that is not an option, so an option's value must be stepped
@@ -715,6 +722,18 @@ def opts_option(value, option):
     if isinstance(value, ShellOpts):
         return getattr(value, option)
     return option in value.split(":")
+
+
+def zsh_option_rcs(name):
+    """What setting the zsh option `name` does to RCS: True, False, or None
+    for another option. zsh reads a name whatever its case, `_`s and, spelled
+    as a long option, `-`s, and reads a leading `no` as the inverse."""
+    name = name.lower().replace("_", "").replace("-", "")
+    if name == "rcs":
+        return True
+    if name == "norcs":
+        return False
+    return None
 
 
 def bash_kind(word):
@@ -3238,6 +3257,50 @@ class Scanner:
             i += 1 + taken
         return value
 
+    @staticmethod
+    def zsh_rcs(words):
+        """Whether zsh's own options `words` leave its RCS option on, so that
+        it reads `.zshenv` and the files after it: True, False or UNKNOWN.
+
+        `-f` turns it off and `+f` on, and so does the option by name, which
+        zsh reads whatever its case and `_`s, a leading `no` inverting it:
+        `-o norcs`, `+o rcs` and `--no-rcs` turn it off, `-o RCS` and `+o
+        no_rcs` on. The last word wins, so `zsh -f -o rcs` reads `.zshenv`
+        after all.
+        """
+        state = True
+        i = 0
+        while i < len(words):
+            word = words[i].value
+            if word is UNKNOWN:
+                return UNKNOWN
+            if word.startswith("--"):
+                rcs = zsh_option_rcs(word[2:])
+                if rcs is not None:
+                    state = rcs
+                i += 2 if word in SHELL_OPT_ARGS else 1
+                continue
+            if word[:1] not in ("-", "+"):
+                i += 1
+                continue
+            on = word.startswith("-")
+            taken = 0
+            for ch in word[1:]:
+                if ch == "f":
+                    state = not on
+                elif ch in "oO":
+                    taken += 1
+                    if ch == "o":
+                        at = i + taken
+                        option = words[at].value if at < len(words) else None
+                        if option is UNKNOWN:
+                            return UNKNOWN
+                        rcs = zsh_option_rcs(option) if option else None
+                        if rcs is not None:
+                            state = rcs if on else not rcs
+            i += 1 + taken
+        return state
+
     # --- the walk ---------------------------------------------------------
 
     def scoped(self, fn):
@@ -5349,8 +5412,15 @@ class Scanner:
         BASH_ENV names, unless privileged or in POSIX mode. So
         `BASH_ENV=/tmp/select-store.sh bash -c 'bd close X'` writes whatever
         store that file exports, and what it does is as unknown as a
-        `source`d file's; see `sub_scan`. bash as `sh` reads none of them for
-        a `-c` script, and other shells are not read for theirs.
+        `source`d file's; see `sub_scan`.
+
+        zsh reads its global zshenv before any script, `-f` or not, and then,
+        unless `-f`, `.zshenv` from `$ZDOTDIR` or `$HOME`; `-i` and `-l` add
+        more. So `ZDOTDIR=/tmp/z zsh -c 'bd close X'` writes whatever store
+        `/tmp/z/.zshenv` selects, and only a zsh whose options leave RCS off,
+        see `zsh_rcs`, where no global zshenv exists at any place in
+        `ZSH_GLOBAL_ZSHENV`, runs none. The other shells are read in
+        `posix_startup_runs`.
 
         Each control is read as an option, where it stands as one and as the
         last word on it says: `bash --rcfile --posix -c ...` names a file
@@ -5369,8 +5439,14 @@ class Scanner:
         A wrapper may make it a login shell too, by the name it runs it
         under; see `argv0_login`.
         """
-        if bash_kind(args[start].value) is not True:
-            return False
+        name = args[start].value.rsplit("/", 1)[-1]
+        if name == "zsh":
+            if self.zsh_rcs(words) is not False:
+                return True
+            return any(os.path.exists(path) for path in ZSH_GLOBAL_ZSHENV)
+        if bash_kind(name) is not True:
+            return self.posix_startup_runs(cmd, args, start, words, name,
+                                           interactive)
         login = self.shell_option(words, "l", "login")
         if login is False:
             login = self.argv0_login(args, start)
@@ -5411,6 +5487,37 @@ class Scanner:
                 args[j].value.rsplit("/", 1)[-1] == "sudo" for j in found):
             return False
         return env is not None and env != ""
+
+    def posix_startup_runs(self, cmd, args, start, words, name, interactive):
+        """Whether `sh`, `dash`, `ksh` or `mksh` may run a startup file before
+        its `-c` script.
+
+        A login shell reads the profile, unless bash as `sh` is told
+        `--noprofile`, which the others refuse. An interactive one reads the
+        file ENV names, as dash and bash as `sh` do: `ENV=/tmp/s.sh sh -i -c
+        'bd close X'` runs it first. ksh reads `~/.kshrc` in its place when
+        ENV is unset, though not when it is set and empty, and reads
+        `KSH_SYSTEM_RC` first, where it exists, whatever ENV says. mksh reads
+        `${ENV:-~/.mkshrc}`, so an empty ENV runs its default file too. A
+        shell that is neither reads none of them, so `BASH_ENV=/tmp/s.sh sh
+        -c ...` runs no file.
+        """
+        login = self.shell_option(words, "l", "login")
+        if login is False:
+            login = self.argv0_login(args, start)
+        if login is not False and \
+                self.shell_option(words, "", "noprofile") is not True:
+            return True
+        if interactive is False:
+            return False
+        if interactive is UNKNOWN or name == "mksh":
+            return True
+        if name == "ksh" and os.path.exists(KSH_SYSTEM_RC):
+            return True
+        env = self.command_env(cmd, args, start, "ENV")
+        if env is None:
+            return name == "ksh"
+        return env is UNKNOWN or bool(env)
 
     def argv0_login(self, args, start):
         """Whether the wrapper that runs the shell at `args[start]` names it

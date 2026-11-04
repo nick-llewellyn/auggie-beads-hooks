@@ -134,6 +134,29 @@ check_gives_up() {
   fi
 }
 
+# zsh runs its global zshenv before any script, `-f` or not, and an
+# interactive ksh93 its system rc whatever ENV says, so a case that needs
+# neither to run holds only on a machine without the file. Asserts the stores
+# a command addresses, as check_target does, when the flag given is 0, and a
+# write the scan could not name when it is 1.
+if [ -e /etc/zshenv ] || [ -e /etc/zsh/zshenv ]; then
+  ZSH_GLOBAL_ZSHENV=1
+else
+  ZSH_GLOBAL_ZSHENV=0
+fi
+if [ -e /etc/ksh.kshrc ]; then
+  KSH_SYSTEM_RC=1
+else
+  KSH_SYSTEM_RC=0
+fi
+check_target_unless() {
+  if [ "$1" -eq 1 ]; then
+    check_unresolved "$3"
+  else
+    check_target "$2" "$3"
+  fi
+}
+
 # --- not bd at all -----------------------------------------------------
 check skip 'ls -la'
 check skip 'git commit -m "bd update"'
@@ -902,11 +925,13 @@ check_unresolved "CDPATH=\$(pick); cd two; bd -C store close CHR-1"
 check_unresolved "false && CDPATH=$CD/one; cd two; bd -C store close CHR-1"
 check_unresolved "cd \$(pick); CDPATH=one:$CD/one; cd two; bd -C store close CHR-1"
 # A CDPATH in the `cd`'s own prefix is the one it searches, in bash, dash and
-# ksh, and lasts only for that `cd`; zsh ignores it.
+# ksh, and lasts only for that `cd`; zsh ignores it. A zsh may have run a
+# startup file first, so its case sets the cwd and CDPATH itself and passes
+# any `cd` function by.
 mkdir -p "$CD/cdp/repo" "$CD/cdp/ext/repo"
 check_target "$CD/cdp/ext/repo/store" "cd $CD/cdp; CDPATH=$CD/cdp/ext cd repo; bd -C store close CHR-1"
 check_target "$CD/cdp/ext/repo/store" "cd $CD/cdp; dash -c 'CDPATH=$CD/cdp/ext cd repo; bd -C store close CHR-1'"
-check_target "$CD/cdp/repo/store" "cd $CD/cdp; zsh -c 'CDPATH=$CD/cdp/ext cd repo; bd -C store close CHR-1'"
+check_target "$CD/cdp/repo/store" "zsh -c 'CDPATH=; builtin cd $CD/cdp; CDPATH=$CD/cdp/ext builtin cd repo; bd -C store close CHR-1'"
 check_target "$CD/cdp/repo/store" "cd $CD/cdp; CDPATH=$CD/cdp/ext; CDPATH= cd repo; bd -C store close CHR-1"
 check_target "$CD/cdp/repo/store" "cd $CD/cdp; CDPATH=$CD/cdp/ext cd repo; cd $CD/cdp; cd repo; bd -C store close CHR-1"
 check_unresolved "cd $CD/cdp; CDPATH=\$(pick) cd repo; bd -C store close CHR-1"
@@ -1731,12 +1756,12 @@ check_target '/tmp/store' 'zsh -c "bd -C /tmp/store close CHR-1"'
 # may set, so a value holding a separator is in doubt there; one without is
 # the same either way.
 check_unresolved "zsh -c 'OUT=\"/tmp/a b\"; bd -C \$OUT close CHR-1'"
-check_target '/tmp/store' "zsh -c 'OUT=/tmp/store; bd -C \$OUT close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" '/tmp/store' "zsh -f -c 'OUT=/tmp/store; bd -C \$OUT close CHR-1'"
 check_target '/tmp/a' "bash -c 'OUT=\"/tmp/a b\"; bd -C \$OUT close CHR-1'"
 # bash runs a startup file before a `-c` script -- BASH_ENV, or a login or
 # interactive shell's own -- and what it sets is as unknown as a sourced
-# file's. Privileged and POSIX-mode shells read no BASH_ENV, and `sh` and
-# other shells are not read for theirs.
+# file's. Privileged and POSIX-mode shells read no BASH_ENV, and neither does
+# `sh`; the other shells' files are below.
 check_unresolved "cd $STORE; BASH_ENV=/tmp/select-store.sh bash -c 'bd close CHR-1'"
 check_unresolved "cd $STORE; env BASH_ENV=/tmp/select-store.sh bash -c 'bd close CHR-1'"
 check_unresolved "cd $STORE; bash -l -c 'bd close CHR-1'"
@@ -1788,6 +1813,32 @@ check_target "$STORE" "cd $STORE; exec -l nohup bash -c 'bd close CHR-1'"
 # name `env -u` unsets, it stops nothing.
 check_target "$STORE" "cd $STORE; sudo bash -c 'bd -C . close CHR-1'"
 check_unresolved "cd $STORE; BASH_ENV=\"\$(printf %s /tmp/select-store.sh)\" env -u sudo bash -c 'bd -C . close CHR-1'"
+# zsh reads its global zshenv before any script, `-f` or not, and `.zshenv`
+# from ZDOTDIR or HOME unless RCS is off, by `-f` or by name with the last
+# word winning, so a zsh may have run a file first unless RCS is off and there
+# is no global zshenv. An interactive sh, dash, ksh or mksh reads the file ENV
+# names; ksh its own with ENV unset but not empty, and its system rc either
+# way, and mksh its own with ENV unset or empty. A login one reads the
+# profile, unless bash as `sh` is told `--noprofile`. One that is neither
+# reads none.
+check_unresolved "cd $STORE; zsh -c 'bd close CHR-1'"
+check_unresolved "cd $STORE; zsh -i -f +f -c 'bd close CHR-1'"
+check_unresolved "cd $STORE; zsh -f -o rcs -c 'bd close CHR-1'"
+check_unresolved "cd $STORE; zsh -f +o NO_RCS -c 'bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$STORE" "cd $STORE; zsh -f -c 'bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$STORE" "cd $STORE; zsh -o no_rcs -c 'bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$STORE" "cd $STORE; zsh +o rcs -c 'bd close CHR-1'"
+check_unresolved "cd $STORE; ENV=/tmp/select-store.sh sh -i -c 'bd close CHR-1'"
+check_unresolved "cd $STORE; ENV=/tmp/select-store.sh dash -i -c 'bd close CHR-1'"
+check_unresolved "cd $STORE; export ENV=/tmp/select-store.sh; dash -i -c 'bd close CHR-1'"
+check_unresolved "cd $STORE; env -u ENV ksh -i -c 'bd close CHR-1'"
+check_unresolved "cd $STORE; sh -l -c 'bd close CHR-1'"
+check_unresolved "cd $STORE; exec -l dash -c 'bd close CHR-1'"
+check_target "$STORE" "cd $STORE; ENV=/tmp/select-store.sh dash -c 'bd close CHR-1'"
+check_target "$STORE" "cd $STORE; ENV= dash -i -c 'bd close CHR-1'"
+check_unresolved "cd $STORE; ENV= mksh -i -c 'bd close CHR-1'"
+check_target_unless "$KSH_SYSTEM_RC" "$STORE" "cd $STORE; ENV= ksh -i -c 'bd close CHR-1'"
+check_target "$STORE" "cd $STORE; sh --noprofile -l -c 'bd close CHR-1'"
 # The file may define a function named `bd`, which may write any store, so a
 # write by that name after it may be one the scan cannot name, though the
 # store its arguments name is still reported. `command bd` runs the program,
@@ -2861,7 +2912,7 @@ check_unresolved "env SHELLOPTS=braceexpand bash -c 'set -P; env SHELLOPTS=\"\$S
 # Any other shell holds SHELLOPTS as a plain variable, which a bash it starts
 # reads as given, whatever that shell's own options.
 check_target "$EXT" "env SHELLOPTS=physical dash -c 'bash -c \"cd $WS_DIR/link/.. && bd close CHR-1\"'"
-check_target "$EXT" "env SHELLOPTS=physical zsh -c 'bash -c \"cd $WS_DIR/link/.. && bd close CHR-1\"'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$EXT" "env SHELLOPTS=physical zsh -f -c 'bash -c \"cd $WS_DIR/link/.. && bd close CHR-1\"'"
 check_target "$EXT" "export SHELLOPTS; set -P; dash -c 'bash -c \"cd $WS_DIR/link/.. && bd close CHR-1\"'"
 check_target "$WS_DIR" "export SHELLOPTS; set -P; dash -c 'unset SHELLOPTS; bash -c \"cd $WS_DIR/link/.. && bd close CHR-1\"'"
 check_target "$WS_DIR" "env SHELLOPTS=physical dash -c 'SHELLOPTS=braceexpand bash -c \"cd $WS_DIR/link/.. && bd close CHR-1\"'"
@@ -2970,8 +3021,8 @@ check_unresolved "cd $EXT; env PWD=$WS_DIR/link/.. bash -c 'cd -P .; bd close CH
 check_unresolved "cd $EXT; env -C . PWD=$WS_DIR/link/.. bash -c 'cd -P .; bd close CHR-1'"
 check_target "$EXT" "cd $EXT; env PWD=$WS_DIR/link/.. dash -c 'cd -P .; bd close CHR-1'"
 check_target "$EXT" "cd $EXT; env PWD=$WS_DIR/link/.. ksh -c 'cd -P .; bd close CHR-1'"
-check_target "$EXT" "cd $EXT; env PWD=$WS_DIR/link/.. zsh -c 'cd -P .; bd close CHR-1'"
-check_target "$EXT" "cd $EXT; env PWD=$WS_DIR/link/.. zsh -c 'bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$EXT" "cd $EXT; env PWD=$WS_DIR/link/.. zsh -f -c 'cd -P .; bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$EXT" "cd $EXT; env PWD=$WS_DIR/link/.. zsh -f -c 'bd close CHR-1'"
 check_target "$WS_DIR" "cd $EXT; env PWD=$WS_DIR/link/.. bash -c 'bd close CHR-1'"
 check_target "$WS_DIR" "cd $EXT; env PWD=$WS_DIR/link/.. dash -c 'bd close CHR-1'"
 check_target "$WS_DIR" "cd $EXT; env -C . PWD=$WS_DIR/link/.. bd close CHR-1"

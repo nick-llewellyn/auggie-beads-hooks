@@ -220,9 +220,9 @@ NICE_ADJUST = re.compile(r"^-[-+]?[0-9]+$")
 # out of `--noprofile` is not a flag of anything: `bash --noprofile --norc -c
 # '...'` runs its script, and reading the first `-` inside the word as an
 # unknown short flag abandoned the invocation. Only the ones that certainly
-# take nothing are listed; `--help` and `--version` run no script and are
-# left out, as is any long option not known here, so an unknown one still
-# abandons the invocation rather than misplacing the script.
+# take nothing are listed, and any other abandons the invocation rather than
+# misplacing the script, except under zsh, which takes each of its options in
+# long form; see `shell_script`.
 SHELL_OPT_ARGS = {"-o", "+o", "-O", "+O", "--rcfile", "--init-file",
                   "--emulate"}
 SHELL_NOARG_LETTERS = set("abcefhiklmnprstuvxBCEHPT")
@@ -230,6 +230,8 @@ SHELL_LONG_NOARG = {"--noprofile", "--norc", "--posix", "--login",
                     "--noediting", "--restricted", "--verbose", "--debugger",
                     "--pretty-print", "--protected", "--no-rcs",
                     "--no-globalrcs", "--interactive"}
+# The long options with which bash and zsh alike run no script.
+SHELL_LONG_NOSCRIPT = {"--help", "--version"}
 # Those of them only zsh takes. bash refuses them as it does any long option it
 # does not know, and runs neither a startup file nor the script: `bash
 # --interactive -c '...'` exits 2 at once.
@@ -3142,9 +3144,20 @@ class Scanner:
                 # invocation is abandoned. Unlike an unknown letter, which
                 # some shell may take, it is no write: bash refuses an
                 # option it does not know, and `--help` runs no script.
+                #
+                # zsh takes every option of its own in long form, though,
+                # `--shwordsplit` as `-o shwordsplit`, and each is a flag, so
+                # none but `--emulate` takes a word: `zsh --shwordsplit -c
+                # '...'` runs its script, and abandoning it missed the write.
+                # One not known here is read as taking nothing. A name zsh
+                # does not know makes it refuse to run, as `--bogus` does,
+                # and the write then read is a sync for nothing. `zsh_rcs`
+                # reads RCS from them, so `zsh -f --rcs` reads `.zshenv`.
                 opt = word.partition("=")[0]
+                zsh = args[start].value.rsplit("/", 1)[-1] == "zsh"
                 if opt in SHELL_LONG_NOARG or \
-                        (opt in SHELL_OPT_ARGS and "=" in word):
+                        (opt in SHELL_OPT_ARGS and "=" in word) or \
+                        (zsh and opt not in SHELL_LONG_NOSCRIPT):
                     i += 1
                     continue
                 return None

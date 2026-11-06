@@ -1828,6 +1828,8 @@ check_unresolved "cd $STORE; zsh -f +o NO_RCS -c 'bd close CHR-1'"
 check_target_unless "$ZSH_GLOBAL_ZSHENV" "$STORE" "cd $STORE; zsh -f -c 'bd close CHR-1'"
 check_target_unless "$ZSH_GLOBAL_ZSHENV" "$STORE" "cd $STORE; zsh -o no_rcs -c 'bd close CHR-1'"
 check_target_unless "$ZSH_GLOBAL_ZSHENV" "$STORE" "cd $STORE; zsh +o rcs -c 'bd close CHR-1'"
+check_unresolved "cd $STORE; zsh -f --rcs -c 'bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$STORE" "cd $STORE; zsh --NO_RCS -c 'bd close CHR-1'"
 check_unresolved "cd $STORE; ENV=/tmp/select-store.sh sh -i -c 'bd close CHR-1'"
 check_unresolved "cd $STORE; ENV=/tmp/select-store.sh dash -i -c 'bd close CHR-1'"
 check_unresolved "cd $STORE; export ENV=/tmp/select-store.sh; dash -i -c 'bd close CHR-1'"
@@ -1946,6 +1948,15 @@ check skip "bash --noprofile --norc -c 'bd list'"
 check skip "bash --nosuchoption -c 'bd -C /tmp/store close CHR-1'"
 check skip "bash --help -c 'bd -C /tmp/store close CHR-1'"
 check skip "bash --version -c 'bd -C /tmp/store close CHR-1'"
+# zsh takes each of its options in long form, and none but `--emulate` takes
+# a word, so there one not known here is read as taking nothing. bash and
+# `sh` refuse `--shwordsplit` and run nothing.
+check_target '/tmp/store' "zsh --shwordsplit -c 'bd -C /tmp/store close CHR-1'"
+check_target '/tmp/store' "/bin/zsh --sh-word-split -x -c 'bd -C /tmp/store close CHR-1'"
+check skip "zsh --help -c 'bd -C /tmp/store close CHR-1'"
+check skip "zsh --version -c 'bd -C /tmp/store close CHR-1'"
+check skip "bash --shwordsplit -c 'bd -C /tmp/store close CHR-1'"
+check skip "sh --shwordsplit -c 'bd -C /tmp/store close CHR-1'"
 
 # An operand this scan cannot read is the fail-safe case, as it is for `eval`
 # and `env -S`: the shell runs that text whatever it says. Read as no write,

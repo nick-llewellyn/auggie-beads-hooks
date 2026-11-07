@@ -156,6 +156,16 @@ check_target_unless() {
     check_target "$2" "$3"
   fi
 }
+# Asserts no store written in the background when the flag given is 0, and the
+# stores given, as check_async does, when it is 1 and the file may turn job
+# control on.
+check_async_unless() {
+  if [ "$1" -eq 1 ]; then
+    check_async "$2" "$3"
+  else
+    check_async "" "$3"
+  fi
+}
 
 # --- not bd at all -----------------------------------------------------
 check skip 'ls -la'
@@ -2851,7 +2861,8 @@ check_unresolved "shopt -s lastpipe; source ./cs-opts.sh; cd $STORE; true | cd $
 # `monitor`, which `export SHELLOPTS` makes of this shell's `set -m`, and a
 # `+m` does not stop it; a privileged one ignores SHELLOPTS, and `env -i`
 # carries none. `-m` and `-i`, zsh's `--interactive` too, only ask for it,
-# which takes a terminal, so after either a `setsid` may fork.
+# which takes a terminal, so after either a `setsid` may fork. zsh's are read
+# by its own names, whatever their case and `_`s, and the last word wins.
 check_async "$STORE" "env SHELLOPTS=monitor bash -c 'setsid bash -c \"sleep 5; bd -C $STORE close CHR-1\" >/dev/null 2>&1; true'"
 check_async "$STORE" "env SHELLOPTS=braceexpand:monitor bash -c 'setsid bd -C $STORE close CHR-1; true'"
 check_async "$STORE" "env SHELLOPTS=monitor bash +m -c 'setsid bd -C $STORE close CHR-1; true'"
@@ -2862,6 +2873,12 @@ check_async "$STORE" "env SHELLOPTS=monitor sh -c 'setsid bd -C $STORE close CHR
 check_async "$STORE" "bash -m -c 'setsid bd -C $STORE close CHR-1; true'"
 check_async "$STORE" "bash -i -c 'setsid bd -C $STORE close CHR-1; true'"
 check_async "$STORE" "zsh --interactive -c 'setsid bd -C $STORE close CHR-1; true'"
+check_async "$STORE" "zsh -f -m -c 'setsid bd -C $STORE close CHR-1; true'"
+check_async "$STORE" "zsh -f --MONITOR -c 'setsid bd -C $STORE close CHR-1; true'"
+check_async "$STORE" "zsh -f --MON_ITOR -c 'setsid bd -C $STORE close CHR-1; true'"
+check_async "$STORE" "zsh -f -o Interactive -c 'setsid bd -C $STORE close CHR-1; true'"
+check_async_unless "$ZSH_GLOBAL_ZSHENV" "$STORE" "zsh -f -m --no-monitor -c 'setsid bd -C $STORE close CHR-1; true'"
+check_async_unless "$ZSH_GLOBAL_ZSHENV" "$STORE" "zsh -f --interactive +o INTERACTIVE -c 'setsid bd -C $STORE close CHR-1; true'"
 check_async "" "env SHELLOPTS=monitor bash -p -c 'setsid bd -C $STORE close CHR-1; true'"
 check_async "" "env SHELLOPTS=monitor bash -c 'set +m; setsid bd -C $STORE close CHR-1; true'"
 check_async "" "set -m; bash -c 'setsid bd -C $STORE close CHR-1; true'"

@@ -3285,7 +3285,7 @@ class Scanner:
         no_rcs` on. The last word wins, so `zsh -f -o rcs` reads `.zshenv`
         after all.
         """
-        return Scanner.zsh_option(words, ("rcs",), True, "f")
+        return Scanner.zsh_option(words, ("rcs",), True, "f", False)
 
     @staticmethod
     def zsh_physical(words):
@@ -3306,13 +3306,13 @@ class Scanner:
         return Scanner.zsh_option(words, ("chaselinks", "physical"), False)
 
     @staticmethod
-    def zsh_option(words, names, state, off=""):
+    def zsh_option(words, names, state, letter="", sets=True):
         """The state zsh's own options `words` leave one of its options in,
         `state` being the one it starts in: True, False or UNKNOWN.
 
         The option goes by `names`, read as `zsh_option_setting` reads them,
-        and `off` is the letter that turns it off, as `-f` does RCS, its `+`
-        turning it on. The last word wins.
+        and `-<letter>` sets it to `sets`, `+<letter>` to the other: `-m`
+        turns MONITOR on, and `-f` turns RCS off. The last word wins.
         """
         i = 0
         while i < len(words):
@@ -3331,8 +3331,8 @@ class Scanner:
             on = word.startswith("-")
             taken = 0
             for ch in word[1:]:
-                if ch == off:
-                    state = not on
+                if ch == letter:
+                    state = sets if on else not sets
                 elif ch in "oO":
                     taken += 1
                     if ch == "o":
@@ -5510,9 +5510,14 @@ class Scanner:
         # returns at once, the `setsid` forking; see `detaches`. `-m` and
         # `-i` only ask for it, and bash grants it only with a terminal to
         # control, which a command may or may not have, so either leaves it
-        # in doubt.
-        asked = self.shell_option(words, "m", "monitor")
-        interactive = self.shell_option(words, "i", "interactive")
+        # in doubt. zsh's are read by its own names, so `--MONITOR` and `-o
+        # Interactive` ask for it too.
+        if shell == "zsh":
+            asked = self.zsh_option(words, ("monitor",), False, "m")
+            interactive = self.zsh_option(words, ("interactive",), False, "i")
+        else:
+            asked = self.shell_option(words, "m", "monitor")
+            interactive = self.shell_option(words, "i", "interactive")
         if inherited["monitor"] is True:
             monitor = True
         elif inherited["monitor"] is False and asked is False and \

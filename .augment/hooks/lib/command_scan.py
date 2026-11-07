@@ -3449,17 +3449,19 @@ class Scanner:
         # see `call_listed`. One it defined anew may be undefined after it,
         # so it is possibly unset as well, and one it defined over an old one
         # may still have the old body, which it keeps beside the new. A frame
-        # that sealed has put the whole table in doubt already.
+        # that sealed has put the whole table in doubt already, and one that
+        # left it as it was, as most do, has nothing to put back.
         if self.seals == seals:
-            for name, bodies in functions.items():
-                now = self.functions.get(name)
-                if now is None:
-                    self.functions[name] = bodies
-                    self.possibly_unset.add(name)
-                elif now is not bodies:
-                    self.functions[name] = merge_bodies(now, bodies)
-            self.possibly_unset |= set(self.functions) - set(functions)
-            self.possibly_unset |= possibly_unset & set(self.functions)
+            if self.functions != functions:
+                for name, bodies in functions.items():
+                    now = self.functions.get(name)
+                    if now is None:
+                        self.functions[name] = bodies
+                        self.possibly_unset.add(name)
+                    elif now is not bodies:
+                        self.functions[name] = merge_bodies(now, bodies)
+                self.possibly_unset |= self.functions.keys() - functions.keys()
+            self.possibly_unset |= possibly_unset & self.functions.keys()
         # A name the frame touched -- assigned, exported, unset, or dropped as
         # `cd` drops an explicit PWD -- is unknown afterwards, in value and in
         # export state alike.
@@ -4245,7 +4247,7 @@ class Scanner:
         it is in doubt.
 
         The table after the call is what any reading may leave; see
-        `merge_function_tables`. Where it was gone it is still gone after the
+        `join_reading`. Where it was gone it is still gone after the
         call, whatever the body defined, so it stays possibly unset: after
         `bd() { . ./defs.sh; bd() { :; }; }; t && unset -f bd; bd list`, `bd
         -C /ext close X` may write /ext. A function the body defined anew
@@ -4268,13 +4270,11 @@ class Scanner:
         before = self.scope.child()
         table = self.function_table()
         seed = self.prefix_seed(cmd)
-        tables = []
+        joined = [None, False]
         for i, entry in enumerate(bodies):
-            self.restore_function_table(table)
             self.call_function(word, entry, seed, before if i else None)
-            tables.append(self.function_table())
+            self.join_reading(joined, table)
         if possibly_unset:
-            self.restore_function_table(table)
             del self.functions[word]
             unread = self.functions_sealed and \
                 word not in ("builtin", "command")
@@ -4286,8 +4286,12 @@ class Scanner:
                     self.seal_sourced()
 
             self.tentative(run, origin=before)
-            tables.append(self.function_table())
-        self.merge_function_tables(tables)
+            self.join_reading(joined, table)
+        listed, unset, sealed, seals = joined[0]
+        self.functions = listed
+        self.possibly_unset = unset & listed.keys()
+        self.functions_sealed = sealed
+        self.seals = seals
 
     def function_table(self):
         """The function table as it stands and what is known of it, to put
@@ -4303,28 +4307,52 @@ class Scanner:
         self.functions_sealed = sealed
         self.seals = seals
 
-    def merge_function_tables(self, tables):
-        """Leaves the function table as any of `tables` may, each one that
-        `function_table` returned after one of a call's readings.
+    def join_reading(self, joined, table):
+        """Joins the function table one reading of a call left into
+        `joined`, and leaves `table`, the one from before the call, for the
+        next reading.
 
-        A function has every body any of them gives it, and is possibly
-        unset where one may lack it. The table is sealed where any is, and
-        the seal count is the highest, so a frame around the call sees a
-        seal one of them made.
+        A function in the join has every body any reading gives it, and is
+        possibly unset where one may lack it. The join is sealed where any
+        reading sealed, with the highest seal count, so a frame around the
+        call sees that seal.
+
+        `joined` holds the join so far, once there is one, and whether a
+        reading that left `table` as it was has been joined. Most leave it
+        so, which comparing the two tells at little cost, and such a reading
+        adds nothing after the first. So only the join is kept, not a table
+        for each reading, and a table is copied and walked only where a
+        reading changed it: with 4000 bodies among 4000 other functions, a
+        table kept for each reading took 600MB and 8s.
         """
-        functions = {}
-        possibly_unset = set()
-        for listed, unset, _, _ in tables:
-            for name, bodies in listed.items():
-                functions[name] = merge_bodies(functions.get(name, ()),
-                                               bodies)
-            possibly_unset |= unset
-        for listed, _, _, _ in tables:
-            possibly_unset |= set(functions) - set(listed)
-        self.functions = functions
-        self.possibly_unset = possibly_unset & set(functions)
-        self.functions_sealed = any(table[2] for table in tables)
-        self.seals = max(table[3] for table in tables)
+        functions, possibly_unset, sealed, seals = table
+        if self.functions == functions and \
+                self.possibly_unset == possibly_unset and \
+                self.functions_sealed == sealed and self.seals == seals:
+            if joined[1]:
+                return
+            joined[1] = True
+            left = table
+        else:
+            left = (self.functions, self.possibly_unset,
+                    self.functions_sealed, self.seals)
+            self.restore_function_table(table)
+        if joined[0] is None:
+            joined[0] = [dict(left[0]), set(left[1]), left[2], left[3]]
+            return
+        merged = joined[0]
+        listed, unset = merged[0], merged[1]
+        unset |= listed.keys() - left[0].keys()
+        for name, bodies in left[0].items():
+            had = listed.get(name)
+            if had is None:
+                listed[name] = bodies
+                unset.add(name)
+            elif had is not bodies:
+                listed[name] = merge_bodies(had, bodies)
+        unset |= left[1]
+        merged[2] = merged[2] or left[2]
+        merged[3] = max(merged[3], left[3])
 
     def decl(self, cmd, conditional):
         """Records the assignments an assignment builtin makes.

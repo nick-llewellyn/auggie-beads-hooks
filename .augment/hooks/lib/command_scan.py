@@ -726,14 +726,15 @@ def opts_option(value, option):
     return option in value.split(":")
 
 
-def zsh_option_rcs(name):
-    """What setting the zsh option `name` does to RCS: True, False, or None
-    for another option. zsh reads a name whatever its case, `_`s and, spelled
-    as a long option, `-`s, and reads a leading `no` as the inverse."""
+def zsh_option_setting(name, names):
+    """What setting the zsh option `name` gives the option `names` spell, in
+    lower case without `_`s: True, False, or None for another option. zsh
+    reads a name whatever its case, `_`s and, spelled as a long option, `-`s,
+    and reads a leading `no` as the inverse."""
     name = name.lower().replace("_", "").replace("-", "")
-    if name == "rcs":
+    if name in names:
         return True
-    if name == "norcs":
+    if name[:2] == "no" and name[2:] in names:
         return False
     return None
 
@@ -3284,16 +3285,44 @@ class Scanner:
         no_rcs` on. The last word wins, so `zsh -f -o rcs` reads `.zshenv`
         after all.
         """
-        state = True
+        return Scanner.zsh_option(words, ("rcs",), True, "f")
+
+    @staticmethod
+    def zsh_physical(words):
+        """Whether zsh's own options `words` start it in physical mode: True,
+        False or UNKNOWN.
+
+        That mode is CHASE_LINKS, which PHYSICAL also names, set by name as
+        RCS is: `--chase-links`, `-o PHYSICAL` and `--chaselinks` turn it on,
+        so `zsh --chaselinks -c 'cd /ws/link/..'` lands where the link points;
+        read by bash's spellings alone, it named /ws. zsh's `-P` is
+        RC_EXPAND_PARAM, and leaves the mode alone. CHASE_DOTS resolves a path
+        holding a `..` as CHASE_LINKS does and keeps the spelling of any
+        other, and a `cd -L` keeps it where it gives up CHASE_LINKS, so with
+        it on the mode is UNKNOWN; see `cd`.
+        """
+        if Scanner.zsh_option(words, ("chasedots",), False) is not False:
+            return UNKNOWN
+        return Scanner.zsh_option(words, ("chaselinks", "physical"), False)
+
+    @staticmethod
+    def zsh_option(words, names, state, off=""):
+        """The state zsh's own options `words` leave one of its options in,
+        `state` being the one it starts in: True, False or UNKNOWN.
+
+        The option goes by `names`, read as `zsh_option_setting` reads them,
+        and `off` is the letter that turns it off, as `-f` does RCS, its `+`
+        turning it on. The last word wins.
+        """
         i = 0
         while i < len(words):
             word = words[i].value
             if word is UNKNOWN:
                 return UNKNOWN
             if word.startswith("--"):
-                rcs = zsh_option_rcs(word[2:])
-                if rcs is not None:
-                    state = rcs
+                setting = zsh_option_setting(word[2:], names)
+                if setting is not None:
+                    state = setting
                 i += 2 if word in SHELL_OPT_ARGS else 1
                 continue
             if word[:1] not in ("-", "+"):
@@ -3302,7 +3331,7 @@ class Scanner:
             on = word.startswith("-")
             taken = 0
             for ch in word[1:]:
-                if ch == "f":
+                if ch == off:
                     state = not on
                 elif ch in "oO":
                     taken += 1
@@ -3311,9 +3340,10 @@ class Scanner:
                         option = words[at].value if at < len(words) else None
                         if option is UNKNOWN:
                             return UNKNOWN
-                        rcs = zsh_option_rcs(option) if option else None
-                        if rcs is not None:
-                            state = rcs if on else not rcs
+                        setting = zsh_option_setting(option, names) \
+                            if option else None
+                        if setting is not None:
+                            state = setting if on else not setting
             i += 1 + taken
         return state
 
@@ -4938,10 +4968,15 @@ class Scanner:
                     break
                 if word is UNKNOWN or not CD_OPT.match(word):
                     break
-                # The last of `-L` and `-P` wins, as in bash.
+                # The last of `-L` and `-P` wins, as in bash. zsh's `-L` gives
+                # up CHASE_LINKS but not CHASE_DOTS, so there a mode that may
+                # be CHASE_DOTS stays UNKNOWN; see `zsh_physical`.
                 for letter in word[1:]:
-                    if letter in "LP":
-                        physical = letter == "P"
+                    if letter == "P":
+                        physical = True
+                    elif letter == "L":
+                        physical = UNKNOWN if self.scope.zsh and \
+                            self.scope.physical is UNKNOWN else False
                 i += 1
         # `cd` with no operand goes to $HOME, and `cd -` to a directory only the
         # shell's history knows.
@@ -5447,8 +5482,10 @@ class Scanner:
         # whatever SHELLOPTS says. A privileged shell ignores SHELLOPTS --
         # `env SHELLOPTS=physical bash -p -c ...` lands in /ws -- and whether
         # it is privileged is settled by the last of `-p`, `+p` and `-o
-        # privileged` among its options.
+        # privileged` among its options. zsh reads no SHELLOPTS, and spells
+        # its own physical mode as `zsh_physical` reads it.
         words = args[start + 1:idx]
+        shell = args[start].value.rsplit("/", 1)[-1]
         privileged = self.shell_option(words, "p", "privileged")
         inherited = {}
         for option in ("physical", "monitor", "posix"):
@@ -5458,7 +5495,10 @@ class Scanner:
             elif privileged is UNKNOWN and state is not False:
                 state = UNKNOWN
             inherited[option] = state
-        own = self.shell_option(words, "P", "physical")
+        if shell == "zsh":
+            own = self.zsh_physical(words)
+        else:
+            own = self.shell_option(words, "P", "physical")
         if inherited["physical"] is True or own is True:
             physical = True
         elif inherited["physical"] is False and own is False:
@@ -5482,7 +5522,6 @@ class Scanner:
             monitor = UNKNOWN
         startup = self.startup_runs(cmd, args, start, words, privileged,
                                     interactive, inherited["posix"])
-        shell = args[start].value.rsplit("/", 1)[-1]
         leader = self.leader
         self.leader = self.leads(args, start)
         try:

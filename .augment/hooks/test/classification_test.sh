@@ -2898,6 +2898,23 @@ check_target "$WS_DIR" "set -P; bash -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
 check_target "$EXT" "bash -P -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
 check_target "$EXT" "bash -o physical -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
 check_target "$WS_DIR" "bash -P +P -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+# zsh's physical mode is CHASE_LINKS, which PHYSICAL also names, set by name
+# whatever its case, `_`s and, in long form, `-`s. Its `-P` is
+# RC_EXPAND_PARAM. CHASE_DOTS resolves only a path holding a `..`, and a
+# `cd -L` keeps it, so there a `..` after a symlink is unknown.
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$EXT" "zsh -f --chaselinks -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$EXT" "zsh -f --chase-links -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$EXT" "zsh -f --PHYSICAL -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$EXT" "zsh -f -o CHASE_LINKS -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$WS_DIR" "zsh -f --chaselinks +o physical -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$WS_DIR" "zsh -f -o chaselinks --no-chase-links -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$WS_DIR" "zsh -f -P -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$WS_DIR" "zsh -f --chaselinks -c 'cd -L $WS_DIR/link/.. && bd close CHR-1'"
+check_unresolved "zsh -f --chasedots -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+check_unresolved "zsh -f --chasedots -c 'cd -L $WS_DIR/link/.. && bd close CHR-1'"
+check_unresolved "zsh -f --chase-dots --chaselinks -c 'cd -L $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$EXT" "zsh -f --chasedots -c 'cd -P $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$WS_DIR" "zsh -f --chasedots -c 'cd $WS_DIR && bd close CHR-1'"
 # bash also starts in physical mode when its SHELLOPTS lists it. It reads
 # SHELLOPTS after its own options, and SHELLOPTS only turns options on, so a
 # `+P` does not undo it. Only bash reads it; `sh` may or may not be bash.

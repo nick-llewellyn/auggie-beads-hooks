@@ -156,6 +156,16 @@ check_target_unless() {
     check_target "$2" "$3"
   fi
 }
+# Asserts no store written in the background when the flag given is 0, and the
+# stores given, as check_async does, when it is 1 and the file may turn job
+# control on.
+check_async_unless() {
+  if [ "$1" -eq 1 ]; then
+    check_async "$2" "$3"
+  else
+    check_async "" "$3"
+  fi
+}
 
 # --- not bd at all -----------------------------------------------------
 check skip 'ls -la'
@@ -1828,6 +1838,8 @@ check_unresolved "cd $STORE; zsh -f +o NO_RCS -c 'bd close CHR-1'"
 check_target_unless "$ZSH_GLOBAL_ZSHENV" "$STORE" "cd $STORE; zsh -f -c 'bd close CHR-1'"
 check_target_unless "$ZSH_GLOBAL_ZSHENV" "$STORE" "cd $STORE; zsh -o no_rcs -c 'bd close CHR-1'"
 check_target_unless "$ZSH_GLOBAL_ZSHENV" "$STORE" "cd $STORE; zsh +o rcs -c 'bd close CHR-1'"
+check_unresolved "cd $STORE; zsh -f --rcs -c 'bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$STORE" "cd $STORE; zsh --NO_RCS -c 'bd close CHR-1'"
 check_unresolved "cd $STORE; ENV=/tmp/select-store.sh sh -i -c 'bd close CHR-1'"
 check_unresolved "cd $STORE; ENV=/tmp/select-store.sh dash -i -c 'bd close CHR-1'"
 check_unresolved "cd $STORE; export ENV=/tmp/select-store.sh; dash -i -c 'bd close CHR-1'"
@@ -1946,6 +1958,15 @@ check skip "bash --noprofile --norc -c 'bd list'"
 check skip "bash --nosuchoption -c 'bd -C /tmp/store close CHR-1'"
 check skip "bash --help -c 'bd -C /tmp/store close CHR-1'"
 check skip "bash --version -c 'bd -C /tmp/store close CHR-1'"
+# zsh takes each of its options in long form, and none but `--emulate` takes
+# a word, so there one not known here is read as taking nothing. bash and
+# `sh` refuse `--shwordsplit` and run nothing.
+check_target '/tmp/store' "zsh --shwordsplit -c 'bd -C /tmp/store close CHR-1'"
+check_target '/tmp/store' "/bin/zsh --sh-word-split -x -c 'bd -C /tmp/store close CHR-1'"
+check skip "zsh --help -c 'bd -C /tmp/store close CHR-1'"
+check skip "zsh --version -c 'bd -C /tmp/store close CHR-1'"
+check skip "bash --shwordsplit -c 'bd -C /tmp/store close CHR-1'"
+check skip "sh --shwordsplit -c 'bd -C /tmp/store close CHR-1'"
 
 # An operand this scan cannot read is the fail-safe case, as it is for `eval`
 # and `env -S`: the shell runs that text whatever it says. Read as no write,
@@ -2840,7 +2861,8 @@ check_unresolved "shopt -s lastpipe; source ./cs-opts.sh; cd $STORE; true | cd $
 # `monitor`, which `export SHELLOPTS` makes of this shell's `set -m`, and a
 # `+m` does not stop it; a privileged one ignores SHELLOPTS, and `env -i`
 # carries none. `-m` and `-i`, zsh's `--interactive` too, only ask for it,
-# which takes a terminal, so after either a `setsid` may fork.
+# which takes a terminal, so after either a `setsid` may fork. zsh's are read
+# by its own names, whatever their case and `_`s, and the last word wins.
 check_async "$STORE" "env SHELLOPTS=monitor bash -c 'setsid bash -c \"sleep 5; bd -C $STORE close CHR-1\" >/dev/null 2>&1; true'"
 check_async "$STORE" "env SHELLOPTS=braceexpand:monitor bash -c 'setsid bd -C $STORE close CHR-1; true'"
 check_async "$STORE" "env SHELLOPTS=monitor bash +m -c 'setsid bd -C $STORE close CHR-1; true'"
@@ -2851,6 +2873,12 @@ check_async "$STORE" "env SHELLOPTS=monitor sh -c 'setsid bd -C $STORE close CHR
 check_async "$STORE" "bash -m -c 'setsid bd -C $STORE close CHR-1; true'"
 check_async "$STORE" "bash -i -c 'setsid bd -C $STORE close CHR-1; true'"
 check_async "$STORE" "zsh --interactive -c 'setsid bd -C $STORE close CHR-1; true'"
+check_async "$STORE" "zsh -f -m -c 'setsid bd -C $STORE close CHR-1; true'"
+check_async "$STORE" "zsh -f --MONITOR -c 'setsid bd -C $STORE close CHR-1; true'"
+check_async "$STORE" "zsh -f --MON_ITOR -c 'setsid bd -C $STORE close CHR-1; true'"
+check_async "$STORE" "zsh -f -o Interactive -c 'setsid bd -C $STORE close CHR-1; true'"
+check_async_unless "$ZSH_GLOBAL_ZSHENV" "$STORE" "zsh -f -m --no-monitor -c 'setsid bd -C $STORE close CHR-1; true'"
+check_async_unless "$ZSH_GLOBAL_ZSHENV" "$STORE" "zsh -f --interactive +o INTERACTIVE -c 'setsid bd -C $STORE close CHR-1; true'"
 check_async "" "env SHELLOPTS=monitor bash -p -c 'setsid bd -C $STORE close CHR-1; true'"
 check_async "" "env SHELLOPTS=monitor bash -c 'set +m; setsid bd -C $STORE close CHR-1; true'"
 check_async "" "set -m; bash -c 'setsid bd -C $STORE close CHR-1; true'"
@@ -2887,6 +2915,23 @@ check_target "$WS_DIR" "set -P; bash -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
 check_target "$EXT" "bash -P -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
 check_target "$EXT" "bash -o physical -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
 check_target "$WS_DIR" "bash -P +P -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+# zsh's physical mode is CHASE_LINKS, which PHYSICAL also names, set by name
+# whatever its case, `_`s and, in long form, `-`s. Its `-P` is
+# RC_EXPAND_PARAM. CHASE_DOTS resolves only a path holding a `..`, and a
+# `cd -L` keeps it, so there a `..` after a symlink is unknown.
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$EXT" "zsh -f --chaselinks -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$EXT" "zsh -f --chase-links -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$EXT" "zsh -f --PHYSICAL -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$EXT" "zsh -f -o CHASE_LINKS -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$WS_DIR" "zsh -f --chaselinks +o physical -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$WS_DIR" "zsh -f -o chaselinks --no-chase-links -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$WS_DIR" "zsh -f -P -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$WS_DIR" "zsh -f --chaselinks -c 'cd -L $WS_DIR/link/.. && bd close CHR-1'"
+check_unresolved "zsh -f --chasedots -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
+check_unresolved "zsh -f --chasedots -c 'cd -L $WS_DIR/link/.. && bd close CHR-1'"
+check_unresolved "zsh -f --chase-dots --chaselinks -c 'cd -L $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$EXT" "zsh -f --chasedots -c 'cd -P $WS_DIR/link/.. && bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$WS_DIR" "zsh -f --chasedots -c 'cd $WS_DIR && bd close CHR-1'"
 # bash also starts in physical mode when its SHELLOPTS lists it. It reads
 # SHELLOPTS after its own options, and SHELLOPTS only turns options on, so a
 # `+P` does not undo it. Only bash reads it; `sh` may or may not be bash.

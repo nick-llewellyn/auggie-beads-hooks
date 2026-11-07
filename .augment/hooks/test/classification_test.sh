@@ -2187,6 +2187,26 @@ check skip "bd() { . ./defs.sh; bd() { :; }; }; bd list; bd -C /tmp/ext close CH
 # `bd` may also be a function that file defined.
 check_target "/tmp/ext" "cs_g() { bd() { :; }; }; true && unset -f cs_g; cs_g; bd -C /tmp/ext close CHR-1"
 check_target_unresolved "/tmp/ext" "cs_g() { . ./defs.sh; bd() { :; }; }; true && unset -f cs_g; cs_g; bd -C /tmp/ext close CHR-1"
+# A definition on a path the shell may not take may not have been made, so
+# a name defined anew there may run the program, as after an `unset -f` on
+# one, and a name defined before may still run its old body. A call or an
+# `eval` may stop before its definitions, as before its assignments. A
+# definition on every path is certain.
+check_target "/tmp/ext $STORE" "cd $STORE; if true; then bd() { command bd -C /tmp/ext close CHR-1; }; fi; bd close CHR-1"
+check_target "/tmp/ext $STORE" "cd $STORE; true && bd() { command bd -C /tmp/ext close CHR-1; }; bd close CHR-1"
+check_target "/tmp/ext $STORE" "cd $STORE; true || bd() { command bd -C /tmp/ext close CHR-1; }; bd close CHR-1"
+check_target "/tmp/ext $STORE" "cd $STORE; cs_g() { bd() { command bd -C /tmp/ext close CHR-1; }; }; cs_g; bd close CHR-1"
+check_target "/tmp/ext $STORE" "cd $STORE; eval 'bd() { command bd -C /tmp/ext close CHR-1; }'; bd close CHR-1"
+check_target "/tmp/ext" "cd $STORE; bd() { command bd -C /tmp/ext close CHR-1; }; bd close CHR-1"
+check_target "/tmp/other /tmp/ext" "cd $STORE; if true; then bd() { command bd -C /tmp/other close CHR-1; }; fi; bd() { command bd -C /tmp/ext close CHR-1; }; bd close CHR-1"
+check_unresolved "cs_f() { cd $CD/other; }; if true; then cs_f() { :; }; fi; cs_f; bd -C store close CHR-1"
+check_unresolved "cs_f() { cd $CD/other; }; true && cs_f() { :; }; cs_f; bd -C store close CHR-1"
+check_unresolved "cs_f() { cd $CD/other; }; cs_g() { cs_f() { :; }; }; cs_g; cs_f; bd -C store close CHR-1"
+check_unresolved "cs_f() { cd $CD/other; }; cs_g() { cs_f() { :; }; }; true && unset -f cs_g; cs_g; cs_f; bd -C store close CHR-1"
+check_target "$BASE/store" "cs_f() { cd $CD/other; }; cs_f() { :; }; cs_f; bd -C store close CHR-1"
+check_target "$BASE/store" "cs_f() { cd $CD/other; }; if true; then cs_f() { :; }; fi; cs_f() { :; }; cs_f; bd -C store close CHR-1"
+# Each body is read at the call, from where the caller stands.
+check_target_unresolved "$BASE/two $BASE/one" "cs_f() { bd -C one close CHR-1; }; true && cs_f() { bd -C two close CHR-1; }; cs_f"
 # A subshell starts with this shell's functions. A new bash process starts
 # with those exported to it, which are not read: after any definition it may
 # have any of them, so a command it names first may be one, and the state

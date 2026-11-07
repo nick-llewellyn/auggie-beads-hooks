@@ -4255,6 +4255,13 @@ class Scanner:
         """
         possibly_unset = word in self.possibly_unset
         bodies = self.functions[word]
+        # A call from inside one of the function's own bodies reads none of
+        # them again (see `call_function`), so one reading stands for them
+        # all. A table taken and joined for each did nothing but cost: with
+        # `t && f() { g; }` written 400 times and `g() { return; f; }`, `f`
+        # took 11s, while the steps charged for it stayed few.
+        if word in self.calling:
+            bodies = bodies[:1]
         if not possibly_unset and len(bodies) == 1:
             self.call_function(word, bodies[0], self.prefix_seed(cmd))
             return

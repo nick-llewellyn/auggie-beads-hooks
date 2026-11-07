@@ -3195,6 +3195,16 @@ for _ in $(seq 1 3000); do
   REDEFINED="$REDEFINED; true && cs_f() { :; }"
 done
 check_target_in_time '/tmp/store' "$REDEFINED; bd -C /tmp/store close CHR-1"
+# A call from inside one of the function's own bodies reads none of them
+# again, so it costs one reading, not one per body: with 600 bodies calling
+# back into the function, one each took more than half a minute. Where the
+# function may be unset, that call still runs the program.
+RECURSIVE=''
+for _ in $(seq 1 600); do
+  RECURSIVE="${RECURSIVE}true && cs_f() { cs_g; }; "
+done
+check_target_in_time '/tmp/store' "${RECURSIVE}cs_g() { return; cs_f; }; cs_f; bd -C /tmp/store close CHR-1"
+check_target '/tmp/ext' "bd() { bd -C /tmp/ext close CHR-1; }; true && unset -f bd; bd list"
 
 echo "classification: pass=$PASS fail=$FAIL"
 [ "$FAIL" -eq 0 ]

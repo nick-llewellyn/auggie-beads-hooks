@@ -752,10 +752,14 @@ def merge_bodies(first, second):
     """The bodies a function has where it may have any of `first` or of
     `second`, each a tuple of `(body, text, raw)`: those of `first` in order,
     then those of `second` it does not hold. A body is the same one where it
-    is the same node of the parse."""
+    is the same node of the parse, which a set of their ids finds in one
+    pass: `t && f() { :; }` written 3000 times took more than a minute when
+    each join compared every pair."""
     merged = list(first)
+    seen = {id(entry[0]) for entry in merged}
     for entry in second:
-        if not any(entry[0] is each[0] for each in merged):
+        if id(entry[0]) not in seen:
+            seen.add(id(entry[0]))
             merged.append(entry)
     return tuple(merged)
 
@@ -4234,6 +4238,12 @@ class Scanner:
         unset -f bd; g` may run the program and write /ext, where reading the
         old body after the new found the new one's `bd`.
 
+        With the table in doubt, the command run with no function of that
+        name listed may still run one, which `call` reads as a function it
+        cannot read, and so it is read here: after `. ./defs.sh; t && g() {
+        builtin :; }`, `g` may run a `g` the file defined, so the state after
+        it is in doubt.
+
         The table after the call is what any reading may leave; see
         `merge_function_tables`. Where it was gone it is still gone after the
         call, whatever the body defined, so it stays possibly unset: after
@@ -4259,9 +4269,16 @@ class Scanner:
         if possibly_unset:
             self.restore_function_table(table)
             del self.functions[word]
-            self.tentative(lambda: self.run_command(cmd, fields, start, split,
-                                                    conditional, follows),
-                           origin=before)
+            unread = self.functions_sealed and \
+                word not in ("builtin", "command")
+
+            def run():
+                self.run_command(cmd, fields, start, split, conditional,
+                                 follows)
+                if unread:
+                    self.seal_sourced()
+
+            self.tentative(run, origin=before)
             tables.append(self.function_table())
         self.merge_function_tables(tables)
 

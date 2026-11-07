@@ -3205,6 +3205,14 @@ for _ in $(seq 1 600); do
 done
 check_target_in_time '/tmp/store' "${RECURSIVE}cs_g() { return; cs_f; }; cs_f; bd -C /tmp/store close CHR-1"
 check_target '/tmp/ext' "bd() { bd -C /tmp/ext close CHR-1; }; true && unset -f bd; bd list"
+# Each reading of a call is joined as it ends, and one that left the function
+# table as it found it is joined once, so the table is not copied for each:
+# 40 calls to a function with 300 bodies among 8000 other functions took
+# half a minute when every reading kept a copy.
+OTHERS=$(printf 'cs_u%d() { :; }; ' $(seq 1 8000))
+BODIES=$(printf 'true && cs_f() { :; }; %.0s' $(seq 1 300))
+CALLS=$(printf 'cs_f; %.0s' $(seq 1 40))
+check_target_in_time '/tmp/store' "$OTHERS$BODIES${CALLS}bd -C /tmp/store close CHR-1"
 
 echo "classification: pass=$PASS fail=$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -4227,36 +4227,80 @@ class Scanner:
         same way: after `h() { cd /ext; }; t && h() { :; }`, `h; bd -C store
         close X` may write /ext/store. See `func_decl` and `tentative`.
 
-        Where it was gone it is still gone after the call, whatever the body
-        defined, so it stays possibly unset; `tentative` does not keep the
-        mark for a body that sealed. After `bd() { . ./defs.sh; bd() { :;
-        }; }; t && unset -f bd; bd list`, `bd -C /ext close X` may write
-        /ext.
+        Each reading starts from the function table before the call as well,
+        so what one does to it is not seen by another. After `bd() { :; };
+        g() { bd -C /ext close X; }`, `t && g() { unset -f bd; }; g` writes
+        nothing either way, and `t && g() { . ./defs.sh; bd() { :; }; };
+        unset -f bd; g` may run the program and write /ext, where reading the
+        old body after the new found the new one's `bd`.
 
-        A function the body defined anew exists only where the body ran, so
-        it is possibly unset after the call: after `g() { bd() { :; }; }; t
-        && unset -f g; g`, `bd -C /ext close X` may write /ext.
+        The table after the call is what any reading may leave; see
+        `merge_function_tables`. Where it was gone it is still gone after the
+        call, whatever the body defined, so it stays possibly unset: after
+        `bd() { . ./defs.sh; bd() { :; }; }; t && unset -f bd; bd list`, `bd
+        -C /ext close X` may write /ext. A function the body defined anew
+        exists only where the body ran, so it is possibly unset after the
+        call: after `g() { bd() { :; }; }; t && unset -f g; g`, `bd -C /ext
+        close X` may write /ext.
         """
         possibly_unset = word in self.possibly_unset
         bodies = self.functions[word]
-        several = possibly_unset or len(bodies) > 1
-        before = self.scope.child() if several else None
-        defined = set(self.functions) if possibly_unset else None
-        seed = self.prefix_seed(cmd)
-        for i, entry in enumerate(bodies):
-            self.call_function(word, entry, seed, before if i else None)
-        if not possibly_unset:
+        if not possibly_unset and len(bodies) == 1:
+            self.call_function(word, bodies[0], self.prefix_seed(cmd))
             return
-        entries = self.functions.pop(word, None)
-        try:
+        before = self.scope.child()
+        table = self.function_table()
+        seed = self.prefix_seed(cmd)
+        tables = []
+        for i, entry in enumerate(bodies):
+            self.restore_function_table(table)
+            self.call_function(word, entry, seed, before if i else None)
+            tables.append(self.function_table())
+        if possibly_unset:
+            self.restore_function_table(table)
+            del self.functions[word]
             self.tentative(lambda: self.run_command(cmd, fields, start, split,
                                                     conditional, follows),
                            origin=before)
-        finally:
-            if entries is not None and word not in self.functions:
-                self.functions[word] = entries
-                self.possibly_unset.add(word)
-            self.possibly_unset |= set(self.functions) - defined
+            tables.append(self.function_table())
+        self.merge_function_tables(tables)
+
+    def function_table(self):
+        """The function table as it stands and what is known of it, to put
+        back with `restore_function_table` or join with others."""
+        return (dict(self.functions), set(self.possibly_unset),
+                self.functions_sealed, self.seals)
+
+    def restore_function_table(self, table):
+        """Puts back a table `function_table` returned."""
+        functions, possibly_unset, sealed, seals = table
+        self.functions = dict(functions)
+        self.possibly_unset = set(possibly_unset)
+        self.functions_sealed = sealed
+        self.seals = seals
+
+    def merge_function_tables(self, tables):
+        """Leaves the function table as any of `tables` may, each one that
+        `function_table` returned after one of a call's readings.
+
+        A function has every body any of them gives it, and is possibly
+        unset where one may lack it. The table is sealed where any is, and
+        the seal count is the highest, so a frame around the call sees a
+        seal one of them made.
+        """
+        functions = {}
+        possibly_unset = set()
+        for listed, unset, _, _ in tables:
+            for name, bodies in listed.items():
+                functions[name] = merge_bodies(functions.get(name, ()),
+                                               bodies)
+            possibly_unset |= unset
+        for listed, _, _, _ in tables:
+            possibly_unset |= set(functions) - set(listed)
+        self.functions = functions
+        self.possibly_unset = possibly_unset & set(functions)
+        self.functions_sealed = any(table[2] for table in tables)
+        self.seals = max(table[3] for table in tables)
 
     def decl(self, cmd, conditional):
         """Records the assignments an assignment builtin makes.

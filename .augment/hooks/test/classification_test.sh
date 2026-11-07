@@ -2205,8 +2205,12 @@ check_unresolved "cs_f() { cd $CD/other; }; cs_g() { cs_f() { :; }; }; cs_g; cs_
 check_unresolved "cs_f() { cd $CD/other; }; cs_g() { cs_f() { :; }; }; true && unset -f cs_g; cs_g; cs_f; bd -C store close CHR-1"
 check_target "$BASE/store" "cs_f() { cd $CD/other; }; cs_f() { :; }; cs_f; bd -C store close CHR-1"
 check_target "$BASE/store" "cs_f() { cd $CD/other; }; if true; then cs_f() { :; }; fi; cs_f() { :; }; cs_f; bd -C store close CHR-1"
-# Each body is read at the call, from where the caller stands.
+# Each body is read at the call, from where the caller stands, and with the
+# functions as they stood before it: what one body does to them is not seen
+# by another.
 check_target_unresolved "$BASE/two $BASE/one" "cs_f() { bd -C one close CHR-1; }; true && cs_f() { bd -C two close CHR-1; }; cs_f"
+check_target "/tmp/ext" "bd() { :; }; cs_g() { bd -C /tmp/ext close CHR-1; }; true && cs_g() { . ./defs.sh; bd() { :; }; }; unset -f bd; cs_g"
+check skip "bd() { :; }; cs_g() { bd -C /tmp/ext close CHR-1; }; true && cs_g() { unset -f bd; }; cs_g"
 # A subshell starts with this shell's functions. A new bash process starts
 # with those exported to it, which are not read: after any definition it may
 # have any of them, so a command it names first may be one, and the state

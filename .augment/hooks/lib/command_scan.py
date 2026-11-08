@@ -5513,14 +5513,31 @@ class Scanner:
         posix` makes a special builtin come before a function of its name;
         see `posix_option`. Only those four are read; the rest of `set` says
         nothing about which store a command opens.
+
+        Each is changed as it is read, as bash changes it: `set -o posix -a`
+        leaves the POSIXLY_CORRECT it sets unexported, where `set -a -o posix`
+        exports it, and `set +o posix -o posix` sets it anew, unexported.
         """
-        state = {}
-        unread = dict.fromkeys(("a", "m", "P", "posix"), UNKNOWN)
+        def change(key, setting):
+            value = UNKNOWN if conditional else setting
+            if key == "a":
+                self.scope.allexport = value
+            elif key == "m":
+                self.scope.monitor = value
+            elif key == "P":
+                self.scope.physical = value
+            else:
+                self.posix_option(value)
+
+        def unread():
+            for key in ("a", "m", "P", "posix"):
+                change(key, UNKNOWN)
+
         i = start + 1
         while i < len(args):
             word = args[i].value
             if word is UNKNOWN:
-                state = dict(unread)
+                unread()
                 i += 1
                 continue
             if word == "--" or not (word.startswith("-") or
@@ -5534,27 +5551,19 @@ class Scanner:
             taken = 0
             for letter in word[1:]:
                 if letter in "amP":
-                    state[letter] = on
+                    change(letter, on)
                 elif letter == "o":
                     taken += 1
                     if i + taken >= len(args):
                         continue
                     option = args[i + taken].value
                     if option is UNKNOWN:
-                        state = dict(unread)
+                        unread()
                     elif option in SET_O_LETTERS:
-                        state[SET_O_LETTERS[option]] = on
+                        change(SET_O_LETTERS[option], on)
                     elif option == "posix":
-                        state["posix"] = on
+                        change("posix", on)
             i += 1 + taken
-        if "a" in state:
-            self.scope.allexport = UNKNOWN if conditional else state["a"]
-        if "m" in state:
-            self.scope.monitor = UNKNOWN if conditional else state["m"]
-        if "P" in state:
-            self.scope.physical = UNKNOWN if conditional else state["P"]
-        if "posix" in state:
-            self.posix_option(UNKNOWN if conditional else state["posix"])
 
     def shopt_builtin(self, args, start, conditional):
         """Records `shopt -s lastpipe` and `shopt -u lastpipe`.
@@ -5613,14 +5622,18 @@ class Scanner:
             return
         value = UNKNOWN if conditional else setting
         if set_o:
-            if "allexport" in names:
-                self.scope.allexport = value
-            if "physical" in names:
-                self.scope.physical = value
-            if "monitor" in names:
-                self.scope.monitor = value
-            if "posix" in names:
-                self.posix_option(value)
+            # In the order given, as bash sets them: `shopt -so posix
+            # allexport` leaves the POSIXLY_CORRECT it sets unexported; see
+            # `set_builtin`.
+            for name in names:
+                if name == "allexport":
+                    self.scope.allexport = value
+                elif name == "physical":
+                    self.scope.physical = value
+                elif name == "monitor":
+                    self.scope.monitor = value
+                elif name == "posix":
+                    self.posix_option(value)
         elif "lastpipe" in names:
             self.scope.lastpipe = value
 

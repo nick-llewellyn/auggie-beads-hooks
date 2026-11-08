@@ -134,6 +134,22 @@ check_gives_up() {
   fi
 }
 
+# Asserts the stores a command addresses, as check_target does, and that the
+# scan answered in the time check_gives_up allows giving up.
+check_target_in_time() {
+  local want="$1" command="$2" started=$SECONDS got
+  scan_command "$command" "$BASE"
+  got="${SCAN_TARGETS[*]:+${SCAN_TARGETS[*]}}"
+  if [ "$got" = "$want" ] && [ "$SCAN_FAILED" -eq 0 ] &&
+    [ $((SECONDS - started)) -le 20 ]; then
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+    printf 'FAIL want=[%s] in time got=[%s] failed=%s after %ss: %.80s\n' \
+      "$want" "$got" "$SCAN_FAILED" $((SECONDS - started)) "$command"
+  fi
+}
+
 # zsh runs its global zshenv before any script, `-f` or not, and an
 # interactive ksh93 its system rc whatever ENV says, so a case that needs
 # neither to run holds only on a machine without the file. Asserts the stores
@@ -2187,6 +2203,35 @@ check skip "bd() { . ./defs.sh; bd() { :; }; }; bd list; bd -C /tmp/ext close CH
 # `bd` may also be a function that file defined.
 check_target "/tmp/ext" "cs_g() { bd() { :; }; }; true && unset -f cs_g; cs_g; bd -C /tmp/ext close CHR-1"
 check_target_unresolved "/tmp/ext" "cs_g() { . ./defs.sh; bd() { :; }; }; true && unset -f cs_g; cs_g; bd -C /tmp/ext close CHR-1"
+# A definition on a path the shell may not take may not have been made, so
+# a name defined anew there may run the program, as after an `unset -f` on
+# one, and a name defined before may still run its old body. A call or an
+# `eval` may stop before its definitions, as before its assignments. A
+# definition on every path is certain.
+check_target "/tmp/ext $STORE" "cd $STORE; if true; then bd() { command bd -C /tmp/ext close CHR-1; }; fi; bd close CHR-1"
+check_target "/tmp/ext $STORE" "cd $STORE; true && bd() { command bd -C /tmp/ext close CHR-1; }; bd close CHR-1"
+check_target "/tmp/ext $STORE" "cd $STORE; true || bd() { command bd -C /tmp/ext close CHR-1; }; bd close CHR-1"
+check_target "/tmp/ext $STORE" "cd $STORE; cs_g() { bd() { command bd -C /tmp/ext close CHR-1; }; }; cs_g; bd close CHR-1"
+check_target "/tmp/ext $STORE" "cd $STORE; eval 'bd() { command bd -C /tmp/ext close CHR-1; }'; bd close CHR-1"
+check_target "/tmp/ext" "cd $STORE; bd() { command bd -C /tmp/ext close CHR-1; }; bd close CHR-1"
+check_target "/tmp/other /tmp/ext" "cd $STORE; if true; then bd() { command bd -C /tmp/other close CHR-1; }; fi; bd() { command bd -C /tmp/ext close CHR-1; }; bd close CHR-1"
+check_unresolved "cs_f() { cd $CD/other; }; if true; then cs_f() { :; }; fi; cs_f; bd -C store close CHR-1"
+check_unresolved "cs_f() { cd $CD/other; }; true && cs_f() { :; }; cs_f; bd -C store close CHR-1"
+check_unresolved "cs_f() { cd $CD/other; }; cs_g() { cs_f() { :; }; }; cs_g; cs_f; bd -C store close CHR-1"
+check_unresolved "cs_f() { cd $CD/other; }; cs_g() { cs_f() { :; }; }; true && unset -f cs_g; cs_g; cs_f; bd -C store close CHR-1"
+check_target "$BASE/store" "cs_f() { cd $CD/other; }; cs_f() { :; }; cs_f; bd -C store close CHR-1"
+check_target "$BASE/store" "cs_f() { cd $CD/other; }; if true; then cs_f() { :; }; fi; cs_f() { :; }; cs_f; bd -C store close CHR-1"
+# Each body is read at the call, from where the caller stands, and with the
+# functions as they stood before it: what one body does to them is not seen
+# by another.
+check_target_unresolved "$BASE/two $BASE/one" "cs_f() { bd -C one close CHR-1; }; true && cs_f() { bd -C two close CHR-1; }; cs_f"
+check_target "/tmp/ext" "bd() { :; }; cs_g() { bd -C /tmp/ext close CHR-1; }; true && cs_g() { . ./defs.sh; bd() { :; }; }; unset -f bd; cs_g"
+check skip "bd() { :; }; cs_g() { bd -C /tmp/ext close CHR-1; }; true && cs_g() { unset -f bd; }; cs_g"
+# With the table in doubt after a sourced file, the command run with no
+# function of that name listed may run one the file defined, so the state
+# after it is in doubt, as after any command a function may be.
+check_unresolved ". ./defs.sh; builtin cd -L $CD/base; command false && cs_g() { builtin :; }; cs_g; command bd -C store close CHR-1"
+check_unresolved ". ./defs.sh; builtin cd -L $CD/base; cs_g() { builtin :; }; command false && builtin unset -f cs_g; cs_g; command bd -C store close CHR-1"
 # A subshell starts with this shell's functions. A new bash process starts
 # with those exported to it, which are not read: after any definition it may
 # have any of them, so a command it names first may be one, and the state
@@ -3142,6 +3187,32 @@ for level in 1 2 3; do
   NESTED="for v$level in $ITEMS; do $NESTED; done"
 done
 check_gives_up "$NESTED"
+# A redefinition on a path the shell may not take keeps the bodies the name
+# had, and joining them costs no more than the bodies: 3000 in a row took
+# more than a minute when each join compared every pair.
+REDEFINED='cs_f() { :; }'
+for _ in $(seq 1 3000); do
+  REDEFINED="$REDEFINED; true && cs_f() { :; }"
+done
+check_target_in_time '/tmp/store' "$REDEFINED; bd -C /tmp/store close CHR-1"
+# A call from inside one of the function's own bodies reads none of them
+# again, so it costs one reading, not one per body: with 600 bodies calling
+# back into the function, one each took more than half a minute. Where the
+# function may be unset, that call still runs the program.
+RECURSIVE=''
+for _ in $(seq 1 600); do
+  RECURSIVE="${RECURSIVE}true && cs_f() { cs_g; }; "
+done
+check_target_in_time '/tmp/store' "${RECURSIVE}cs_g() { return; cs_f; }; cs_f; bd -C /tmp/store close CHR-1"
+check_target '/tmp/ext' "bd() { bd -C /tmp/ext close CHR-1; }; true && unset -f bd; bd list"
+# Each reading of a call is joined as it ends, and one that left the function
+# table as it found it is joined once, so the table is not copied for each:
+# 40 calls to a function with 300 bodies among 8000 other functions took
+# half a minute when every reading kept a copy.
+OTHERS=$(printf 'cs_u%d() { :; }; ' $(seq 1 8000))
+BODIES=$(printf 'true && cs_f() { :; }; %.0s' $(seq 1 300))
+CALLS=$(printf 'cs_f; %.0s' $(seq 1 40))
+check_target_in_time '/tmp/store' "$OTHERS$BODIES${CALLS}bd -C /tmp/store close CHR-1"
 
 echo "classification: pass=$PASS fail=$FAIL"
 [ "$FAIL" -eq 0 ]

@@ -748,6 +748,22 @@ def bash_kind(word):
     return UNKNOWN if name == "sh" else False
 
 
+def merge_bodies(first, second):
+    """The bodies a function has where it may have any of `first` or of
+    `second`, each a tuple of `(body, text, raw)`: those of `first` in order,
+    then those of `second` it does not hold. A body is the same one where it
+    is the same node of the parse, which a set of their ids finds in one
+    pass: `t && f() { :; }` written 3000 times took more than a minute when
+    each join compared every pair."""
+    merged = list(first)
+    seen = {id(entry[0]) for entry in merged}
+    for entry in second:
+        if id(entry[0]) not in seen:
+            seen.add(id(entry[0]))
+            merged.append(entry)
+    return tuple(merged)
+
+
 def unescape(text):
     """A literal's value with the shell's backslash escapes applied.
 
@@ -1611,9 +1627,10 @@ class Scanner:
                            monitor="monitor" in opts,
                            physical="physical" in opts)
         self.depth = 0
-        # Bodies of the functions defined so far, by name, each with the text
-        # it was parsed from, and the names whose bodies are being scanned
-        # right now. A body is scanned twice -- once where it is defined and
+        # The functions defined so far, by name, each with a tuple of the
+        # bodies it may have and the text each was parsed from; see
+        # `func_decl`. And the names whose bodies are being scanned right
+        # now. A body is scanned twice -- once where it is defined and
         # once at each call -- so the same store can be named more than once;
         # a repeated target is dropped rather than reported twice, since a
         # caller would sync it twice for no purpose.
@@ -1623,8 +1640,9 @@ class Scanner:
         # first may be a function it does not list; see `seal_opaque` and
         # `imported_functions`.
         self.functions_sealed = False
-        # The functions an `unset -f` may or may not have removed, which are
-        # kept in the table; see `call_listed`.
+        # The functions an `unset -f` may or may not have removed, or a
+        # definition on a path the shell may not take may not have made,
+        # which are kept in the table; see `call_listed`.
         self.possibly_unset = set()
         # The variables unset, and the number of seals, so far; see
         # `call_function`.
@@ -3428,14 +3446,22 @@ class Scanner:
             self.scope = saved
         # A function the frame unset may still be defined after it, as after
         # an `unset -f` on one branch, so it is put back and read both ways;
-        # see `call_listed`. One it may have defined anew stays defined. A
-        # frame that sealed has put the whole table in doubt already.
+        # see `call_listed`. One it defined anew may be undefined after it,
+        # so it is possibly unset as well, and one it defined over an old one
+        # may still have the old body, which it keeps beside the new. A frame
+        # that sealed has put the whole table in doubt already, and one that
+        # left it as it was, as most do, has nothing to put back.
         if self.seals == seals:
-            for name, entry in functions.items():
-                if name not in self.functions:
-                    self.functions[name] = entry
-                    self.possibly_unset.add(name)
-            self.possibly_unset |= possibly_unset & set(self.functions)
+            if self.functions != functions:
+                for name, bodies in functions.items():
+                    now = self.functions.get(name)
+                    if now is None:
+                        self.functions[name] = bodies
+                        self.possibly_unset.add(name)
+                    elif now is not bodies:
+                        self.functions[name] = merge_bodies(now, bodies)
+                self.possibly_unset |= self.functions.keys() - functions.keys()
+            self.possibly_unset |= possibly_unset & self.functions.keys()
         # A name the frame touched -- assigned, exported, unset, or dropped as
         # `cd` drops an explicit PWD -- is unknown afterwards, in value and in
         # export state alike.
@@ -3920,7 +3946,7 @@ class Scanner:
                     self.word_subs(pattern)
                 self.branch(item.get("Stmts"))
         elif kind == "FuncDecl":
-            self.func_decl(cmd)
+            self.func_decl(cmd, conditional)
         elif kind == "TimeClause":
             if cmd.get("Stmt"):
                 self.stmt(cmd["Stmt"], conditional, follows)
@@ -4054,7 +4080,7 @@ class Scanner:
             for item in node:
                 self.walk_words(item)
 
-    def func_decl(self, cmd):
+    def func_decl(self, cmd, conditional=False):
         """Scans a function body without letting it speak for the shell.
 
         A definition stores its body rather than running it, so a `cd` in one
@@ -4063,6 +4089,13 @@ class Scanner:
         and assignments must not reach past the definition -- but a `bd` written
         inside one is still a write this text performs if the function is ever
         called, and dropping it would strand the store it opens.
+
+        On a path the shell may not take, the definition may not have been
+        made: after `t && bd() { command bd -C /ext close X; }`, `bd close X`
+        may run the program, and after `h() { cd /ext; }; t && h() { :; }`,
+        `h` may still run the old body. A name defined anew there is possibly
+        unset, as after an `unset -f` on such a path, and one defined before
+        keeps the bodies it had beside the new one; see `call_listed`.
         """
         body = cmd.get("Body")
         if not body:
@@ -4073,8 +4106,16 @@ class Scanner:
         # `call_function`.
         if cmd.get("Name"):
             name = cmd["Name"]["Value"]
-            self.functions[name] = (body, self.text, self.raw)
-            self.possibly_unset.discard(name)
+            bodies = ((body, self.text, self.raw),)
+            if not conditional:
+                self.functions[name] = bodies
+                self.possibly_unset.discard(name)
+            elif name in self.functions:
+                self.functions[name] = merge_bodies(bodies,
+                                                    self.functions[name])
+            else:
+                self.functions[name] = bodies
+                self.possibly_unset.add(name)
 
         def run():
             # Scanned here too, and with the cwd unknown. A definition that is
@@ -4091,8 +4132,9 @@ class Scanner:
 
         self.scoped(run)
 
-    def call_function(self, name, seed=None):
-        """Scans the body of `name` as it runs here, in the caller's directory.
+    def call_function(self, name, entry, seed=None, origin=None):
+        """Scans `entry`, a body of `name`, as it runs here, in the caller's
+        directory.
 
         This is what makes `f() { bd -C store ...; }; cd /x; f` name /x/store.
         The definition alone cannot: it does not say where its caller stands, so
@@ -4121,10 +4163,13 @@ class Scanner:
         calls itself names no further store on the second pass. That is the whole
         termination argument here: a body already being scanned is not scanned
         again, so a chain of calls is at most as long as there are definitions.
+
+        `origin` is a scope to start the call from instead of this one, for
+        one of several bodies the function may have; see `call_listed`.
         """
         if name in self.calling:
             return
-        body, text, raw = self.functions[name]
+        body, text, raw = entry
         seed = seed or {}
 
         def run():
@@ -4165,7 +4210,7 @@ class Scanner:
             # to the end, and which of its branches it took, is exactly what
             # the scan declines to infer -- so what it changed is unknown
             # afterwards, as it is after any compound command.
-            self.tentative(run)
+            self.tentative(run, origin)
         finally:
             self.depth -= 1
             self.calling.discard(name)
@@ -4183,32 +4228,131 @@ class Scanner:
         `bd() { cd /ext; command bd close X; }; t && unset -f bd`, `bd close
         X` writes /ext or the store it walks up to from where it started.
 
-        Where it was gone it is still gone after the call, whatever the body
-        defined, so it stays possibly unset; `tentative` does not keep the
-        mark for a body that sealed. After `bd() { . ./defs.sh; bd() { :;
-        }; }; t && unset -f bd; bd list`, `bd -C /ext close X` may write
-        /ext.
+        One defined over an earlier one on a path the shell may not take may
+        still have the earlier body by the call, and each body is read the
+        same way: after `h() { cd /ext; }; t && h() { :; }`, `h; bd -C store
+        close X` may write /ext/store. See `func_decl` and `tentative`.
 
-        A function the body defined anew exists only where the body ran, so
-        it is possibly unset after the call: after `g() { bd() { :; }; }; t
-        && unset -f g; g`, `bd -C /ext close X` may write /ext.
+        Each reading starts from the function table before the call as well,
+        so what one does to it is not seen by another. After `bd() { :; };
+        g() { bd -C /ext close X; }`, `t && g() { unset -f bd; }; g` writes
+        nothing either way, and `t && g() { . ./defs.sh; bd() { :; }; };
+        unset -f bd; g` may run the program and write /ext, where reading the
+        old body after the new found the new one's `bd`.
+
+        With the table in doubt, the command run with no function of that
+        name listed may still run one, which `call` reads as a function it
+        cannot read, and so it is read here: after `. ./defs.sh; t && g() {
+        builtin :; }`, `g` may run a `g` the file defined, so the state after
+        it is in doubt.
+
+        The table after the call is what any reading may leave; see
+        `join_reading`. Where it was gone it is still gone after the
+        call, whatever the body defined, so it stays possibly unset: after
+        `bd() { . ./defs.sh; bd() { :; }; }; t && unset -f bd; bd list`, `bd
+        -C /ext close X` may write /ext. A function the body defined anew
+        exists only where the body ran, so it is possibly unset after the
+        call: after `g() { bd() { :; }; }; t && unset -f g; g`, `bd -C /ext
+        close X` may write /ext.
         """
         possibly_unset = word in self.possibly_unset
-        before = self.scope.child() if possibly_unset else None
-        defined = set(self.functions) if possibly_unset else None
-        self.call_function(word, self.prefix_seed(cmd))
-        if not possibly_unset:
+        bodies = self.functions[word]
+        # A call from inside one of the function's own bodies reads none of
+        # them again (see `call_function`), so one reading stands for them
+        # all. A table taken and joined for each did nothing but cost: with
+        # `t && f() { g; }` written 400 times and `g() { return; f; }`, `f`
+        # took 11s, while the steps charged for it stayed few.
+        if word in self.calling:
+            bodies = bodies[:1]
+        if not possibly_unset and len(bodies) == 1:
+            self.call_function(word, bodies[0], self.prefix_seed(cmd))
             return
-        entry = self.functions.pop(word, None)
-        try:
-            self.tentative(lambda: self.run_command(cmd, fields, start, split,
-                                                    conditional, follows),
-                           origin=before)
-        finally:
-            if entry is not None and word not in self.functions:
-                self.functions[word] = entry
-                self.possibly_unset.add(word)
-            self.possibly_unset |= set(self.functions) - defined
+        before = self.scope.child()
+        table = self.function_table()
+        seed = self.prefix_seed(cmd)
+        joined = [None, False]
+        for i, entry in enumerate(bodies):
+            self.call_function(word, entry, seed, before if i else None)
+            self.join_reading(joined, table)
+        if possibly_unset:
+            del self.functions[word]
+            unread = self.functions_sealed and \
+                word not in ("builtin", "command")
+
+            def run():
+                self.run_command(cmd, fields, start, split, conditional,
+                                 follows)
+                if unread:
+                    self.seal_sourced()
+
+            self.tentative(run, origin=before)
+            self.join_reading(joined, table)
+        listed, unset, sealed, seals = joined[0]
+        self.functions = listed
+        self.possibly_unset = unset & listed.keys()
+        self.functions_sealed = sealed
+        self.seals = seals
+
+    def function_table(self):
+        """The function table as it stands and what is known of it, to put
+        back with `restore_function_table` or join with others."""
+        return (dict(self.functions), set(self.possibly_unset),
+                self.functions_sealed, self.seals)
+
+    def restore_function_table(self, table):
+        """Puts back a table `function_table` returned."""
+        functions, possibly_unset, sealed, seals = table
+        self.functions = dict(functions)
+        self.possibly_unset = set(possibly_unset)
+        self.functions_sealed = sealed
+        self.seals = seals
+
+    def join_reading(self, joined, table):
+        """Joins the function table one reading of a call left into
+        `joined`, and leaves `table`, the one from before the call, for the
+        next reading.
+
+        A function in the join has every body any reading gives it, and is
+        possibly unset where one may lack it. The join is sealed where any
+        reading sealed, with the highest seal count, so a frame around the
+        call sees that seal.
+
+        `joined` holds the join so far, once there is one, and whether a
+        reading that left `table` as it was has been joined. Most leave it
+        so, which comparing the two tells at little cost, and such a reading
+        adds nothing after the first. So only the join is kept, not a table
+        for each reading, and a table is copied and walked only where a
+        reading changed it: with 4000 bodies among 4000 other functions, a
+        table kept for each reading took 600MB and 8s.
+        """
+        functions, possibly_unset, sealed, seals = table
+        if self.functions == functions and \
+                self.possibly_unset == possibly_unset and \
+                self.functions_sealed == sealed and self.seals == seals:
+            if joined[1]:
+                return
+            joined[1] = True
+            left = table
+        else:
+            left = (self.functions, self.possibly_unset,
+                    self.functions_sealed, self.seals)
+            self.restore_function_table(table)
+        if joined[0] is None:
+            joined[0] = [dict(left[0]), set(left[1]), left[2], left[3]]
+            return
+        merged = joined[0]
+        listed, unset = merged[0], merged[1]
+        unset |= listed.keys() - left[0].keys()
+        for name, bodies in left[0].items():
+            had = listed.get(name)
+            if had is None:
+                listed[name] = bodies
+                unset.add(name)
+            elif had is not bodies:
+                listed[name] = merge_bodies(had, bodies)
+        unset |= left[1]
+        merged[2] = merged[2] or left[2]
+        merged[3] = max(merged[3], left[3])
 
     def decl(self, cmd, conditional):
         """Records the assignments an assignment builtin makes.

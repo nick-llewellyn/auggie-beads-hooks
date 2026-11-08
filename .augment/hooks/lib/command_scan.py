@@ -4270,7 +4270,10 @@ class Scanner:
         `function_first`. That builtin is read the same way, with the
         function still defined: after `unset() { :; }; t && set -o posix`,
         `unset BEADS_DIR; bd close X` may run with or without the BEADS_DIR
-        it inherited.
+        it inherited. Where the function may be gone as well, the two are
+        read apart, since the builtin may call the function yet: after `D=/a;
+        eval() { bd -C "$D" close X; }; t && unset -f eval; t && set -o
+        posix`, `eval 'D=/b; set +o posix; eval :'` may write /b.
 
         One defined over an earlier one on a path the shell may not take may
         still have the earlier body by the call, and each body is read the
@@ -4320,11 +4323,11 @@ class Scanner:
         for i, entry in enumerate(bodies):
             self.call_function(word, entry, seed, before if i else None)
             self.join_reading(joined, table)
-        if possibly_unset or passed:
-            if possibly_unset:
+        unread = self.functions_sealed and word not in ("builtin", "command")
+
+        def passed_by(gone):
+            if gone:
                 del self.functions[word]
-            unread = self.functions_sealed and \
-                word not in ("builtin", "command")
 
             def run():
                 self.run_command(cmd, fields, start, split, conditional,
@@ -4334,6 +4337,11 @@ class Scanner:
 
             self.tentative(run, origin=before)
             self.join_reading(joined, table)
+
+        if passed:
+            passed_by(False)
+        if possibly_unset:
+            passed_by(True)
         listed, unset, sealed, seals = joined[0]
         self.functions = listed
         self.possibly_unset = unset & listed.keys()
@@ -4554,6 +4562,14 @@ class Scanner:
         unread = self.functions_sealed and (
             first is UNKNOWN or (first not in self.functions and
                                  first not in ("builtin", "command")))
+        # A temporary POSIXLY_CORRECT puts bash 5.2 in POSIX mode for the
+        # command, which may keep it: there `POSIXLY_CORRECT=1 unset X` runs
+        # the builtin over a function `unset`, as does a function so called
+        # in its body, and the mode outlives a special builtin. bash 3.2
+        # does none of this, so the mode is in doubt from here on.
+        if any((arg.get("Name") or {}).get("Value") == "POSIXLY_CORRECT"
+               for arg in assigns):
+            self.posix_mode(UNKNOWN)
         self.run_command(cmd, fields, start, split, conditional, follows)
         if unread:
             self.seal_sourced()

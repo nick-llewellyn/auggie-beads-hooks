@@ -2314,6 +2314,12 @@ check_unresolved ":() { builtin cd $STORE/nested/inner; }; cd $STORE; :; bd clos
 check_target "$STORE" "trap() { builtin cd $STORE/nested/inner; }; set -o posix; cd $STORE; trap '' HUP; bd close CHR-1"
 check_target "$STORE" "function export { builtin cd $STORE/nested/inner; }; set -o posix; cd $STORE; \\export CS_X=1; bd close CHR-1"
 check_target "$STORE" "return() { builtin cd $STORE/nested/inner; }; set -o posix; cs_f() { return; }; cd $STORE; cs_f; bd close CHR-1"
+# A temporary POSIXLY_CORRECT puts bash 5.2 in that mode for the command, for
+# a function's body, and after a special builtin, where bash 3.2 stays as it
+# was, so the mode is in doubt.
+check_unresolved "export BEADS_DIR=/tmp/store/.beads; unset() { :; }; cd $STORE; POSIXLY_CORRECT=1 unset BEADS_DIR; bd close CHR-1"
+check_target_unresolved '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; unset() { :; }; cs_f() { unset BEADS_DIR; bd close CHR-1; }; cd $STORE; POSIXLY_CORRECT=1 cs_f"
+check_unresolved "export BEADS_DIR=/tmp/store/.beads; unset() { :; }; POSIXLY_CORRECT=1 eval true; cd $STORE; unset BEADS_DIR; bd close CHR-1"
 # A shell starts in that mode as bash's options and environment say, and as
 # `sh`; zsh finds the function first.
 check_target '/tmp/store' "cd $STORE; BEADS_DIR=/tmp/store/.beads bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
@@ -2324,6 +2330,9 @@ check_target_unless "$ZSH_GLOBAL_ZSHENV" '/tmp/store' "cd $STORE; BEADS_DIR=/tmp
 # A builtin read in place of a call reads the function table from before it,
 # whatever the body did to the table.
 check_unresolved "cd $STORE; cs_g() { builtin cd $STORE/nested/inner; }; eval() { unset -f cs_g; }; t && unset -f eval; eval cs_g; bd close CHR-1"
+# Where the function may be gone as well as passed by, the builtin is also
+# read with it defined: an `eval` may leave POSIX mode and call it.
+check_target "$STORE $STORE/nested/inner" "cd $STORE; CS_D=$STORE; eval() { bd -C \"\$CS_D\" close CHR-1; }; t && unset -f eval; t && set -o posix; eval 'CS_D=$STORE/nested/inner; set +o posix; eval :'"
 
 # --- comments -------------------------------------------------------------
 # A `#` that opens a word begins a comment, and what follows is not script.

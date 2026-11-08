@@ -1893,9 +1893,9 @@ check_target "$STORE" ". ./select-store.sh; command cd -L $STORE; env -i bd clos
 check_target "$STORE" "(. ./select-store.sh); cd -L $STORE; env -i bd close CHR-1"
 check_target "$STORE" ". ./select-store.sh; BEADS_DIR=$STORE/.beads command bd close CHR-1"
 check_target '/tmp/store' ". ./select-store.sh; eval 'command bd -C /tmp/store close CHR-1'"
-# A function of its name this text defined does not displace the builtin:
-# in POSIX mode bash finds `export`, `unset` and the other special builtins
-# first, and that mode may be set at any point.
+# In POSIX mode, which may be set at any point, bash finds `export`, `unset`
+# and the other special builtins before a function of the same name this
+# text defined.
 check_target "$STORE" "function export { :; }; builtin set -o posix; export BEADS_DIR=$STORE/.beads; command bd close CHR-1"
 check_target "$STORE" "export BEADS_DIR=/tmp/store/.beads; function unset { :; }; builtin set -o posix; unset BEADS_DIR; cd $STORE; command bd close CHR-1"
 check_target '/tmp/store' '/bin/bash -c "bd -C /tmp/store close CHR-1"'
@@ -2287,6 +2287,36 @@ check_target "$STORE" "bd() { env bd -C $STORE close CHR-1; }; bd"
 # running the program, even where the name ends in a builtin's.
 check_target "$STORE" "./cd() { bd -C . close CHR-1; }; cd $STORE; ./cd"
 check_unresolved "./cd() { builtin cd /tmp; }; ./cd $STORE; env -i bd close CHR-1"
+# A function is found before a builtin of the same name, so one named after a
+# builtin the scan reads is called rather than read. `builtin cd` and `command
+# cd` pass it by.
+check_target "$STORE" "cd $STORE; cd() { bd -C . close CHR-1; }; cd /tmp"
+check_unresolved "cd() { builtin cd $STORE/nested/inner; }; cd $STORE; bd close CHR-1"
+check_target "$STORE" "cd() { builtin cd $STORE/nested/inner; }; builtin cd $STORE; bd close CHR-1"
+check_target "$STORE" "cd() { builtin cd $STORE/nested/inner; }; command cd $STORE; bd close CHR-1"
+check_unresolved "printf() { builtin cd $STORE/nested/inner; }; cd $STORE; printf x; bd close CHR-1"
+check_unresolved "bash() { builtin cd $STORE/nested/inner; }; cd $STORE; bash -c true; bd close CHR-1"
+check_target "$STORE" "source() { :; }; cd $STORE; source ./select-store.sh; bd close CHR-1"
+# A special builtin comes first in POSIX mode instead, and where that mode is
+# unknown both are read. `set -o posix`, `shopt -so posix` and assigning
+# POSIXLY_CORRECT turn it on, and unsetting POSIXLY_CORRECT turns it off.
+check_unresolved "unset() { builtin cd $STORE/nested/inner; }; cd $STORE; unset X; bd close CHR-1"
+check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; unset() { :; }; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set -o posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; t && set -o posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; shopt -so posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; POSIXLY_CORRECT=1; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; unset() { :; }; POSIXLY_CORRECT=1; builtin unset POSIXLY_CORRECT; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+# A shell starts in that mode as bash's options and environment say, and as
+# `sh`; zsh finds the function first.
+check_target '/tmp/store' "cd $STORE; BEADS_DIR=/tmp/store/.beads bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; cd $STORE; BEADS_DIR=/tmp/store/.beads bash --posix -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; cd $STORE; POSIXLY_CORRECT= BEADS_DIR=/tmp/store/.beads bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; cd $STORE; BEADS_DIR=/tmp/store/.beads sh -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" '/tmp/store' "cd $STORE; BEADS_DIR=/tmp/store/.beads zsh -f -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+# A builtin read in place of a call reads the function table from before it,
+# whatever the body did to the table.
+check_unresolved "cd $STORE; cs_g() { builtin cd $STORE/nested/inner; }; eval() { unset -f cs_g; }; t && unset -f eval; eval cs_g; bd close CHR-1"
 
 # --- comments -------------------------------------------------------------
 # A `#` that opens a word begins a comment, and what follows is not script.

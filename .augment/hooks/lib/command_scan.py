@@ -429,6 +429,10 @@ SOURCE_WORDS = {"source", "."}
 # the shell: `/usr/bin/cd /decoy; bd close X` writes the store it started in.
 SHELL_STATE_WORDS = CHDIR_WORDS | set(READ_WORDS) | {
     "unset", "set", "shopt", "eval", "getopts", "printf"}
+# The special builtins among those read here, which a shell in POSIX mode
+# finds before a function of the same name; see `Scope.posix`. bash treats
+# `source` as it treats `.`.
+SPECIAL_BUILTINS = SOURCE_WORDS | {"unset", "set", "eval"}
 # The `set -o` names of the options `set` is read for, by the letter that is
 # their short form; see `set_builtin`.
 SET_O_LETTERS = {"allexport": "a", "monitor": "m", "physical": "P"}
@@ -1518,7 +1522,8 @@ class Scope:
 
     def __init__(self, cwd, known, assigns, sealed=False, exported=None,
                  allexport=False, lastpipe=False, monitor=False,
-                 physical=False, spelled=True, bash=True, zsh=False):
+                 physical=False, spelled=True, bash=True, zsh=False,
+                 posix=False):
         self.cwd = cwd
         self.known = known
         # Whether `cwd` is also how the shell's PWD spells the directory:
@@ -1573,12 +1578,19 @@ class Scope:
         # Whether this shell is zsh, which unlike the others ignores a CDPATH
         # in a `cd`'s own prefix; see `cd_path`.
         self.zsh = zsh
+        # Whether a special builtin is found before a function of the same
+        # name, as POSIX asks. bash does so in its POSIX mode, which `set -o
+        # posix`, an inherited SHELLOPTS listing `posix` and POSIXLY_CORRECT
+        # turn on, and which it is in as `sh`; dash and ksh refuse to define
+        # such a function at all; zsh never does. UNKNOWN when the text may or
+        # may not have changed it. See `function_first`.
+        self.posix = posix
 
     def child(self):
         return Scope(self.cwd, self.known, dict(self.assigns), self.sealed,
                      dict(self.exported), self.allexport, self.lastpipe,
                      self.monitor, self.physical, self.spelled, self.bash,
-                     self.zsh)
+                     self.zsh, self.posix)
 
     def last_member_stays(self):
         """Whether a pipeline's last member runs in this shell: True, False
@@ -1617,15 +1629,18 @@ class Scanner:
         # start instead, which leaves such a target unresolved.
         #
         # The shell the command runs in imports an inherited SHELLOPTS, so one
-        # listing `physical` starts it in physical mode, and one listing
-        # `monitor` with job control; see `shellopts_option`. It sets and
+        # listing `physical` starts it in physical mode, one listing
+        # `monitor` with job control, and one listing `posix`, or a
+        # POSIXLY_CORRECT, in POSIX mode; see `shellopts_option`. It sets and
         # exports PWD as it starts, whatever this process's environment
         # holds; see `sub_scan`.
         opts = os.environ.get("SHELLOPTS", "").split(":")
         self.scope = Scope(launch_cwd, bool(launch_cwd), {},
                            exported={"PWD": True},
                            monitor="monitor" in opts,
-                           physical="physical" in opts)
+                           physical="physical" in opts,
+                           posix="posix" in opts or
+                           "POSIXLY_CORRECT" in os.environ)
         self.depth = 0
         # The functions defined so far, by name, each with a tuple of the
         # bodies it may have and the text each was parsed from; see
@@ -3482,6 +3497,8 @@ class Scanner:
             saved.monitor = UNKNOWN
         if base.physical != inner.physical:
             saved.physical = UNKNOWN
+        if base.posix != inner.posix:
+            saved.posix = UNKNOWN
         # A frame that sealed its scope -- a `source`d file may export
         # anything -- leaves every name in doubt, not only those it touched:
         # `if t; then . ./select-store.sh; fi; bd close X` may run with a
@@ -3496,7 +3513,7 @@ class Scanner:
     def sub_scan(self, stmts, cwd=None, known=None, seed=None, text=None,
                  sealed=False, conditional=False, frame="subshell",
                  process=False, physical=False, monitor=False, shell=None,
-                 pwd=None, startup=False, functions=None):
+                 pwd=None, startup=False, functions=None, posix=False):
         """Scans `stmts` as a subshell: its writes count, its state does not.
 
         `text` is the source those statements were parsed from, needed when they
@@ -3516,8 +3533,8 @@ class Scanner:
         which is the exported names alone -- see `environment_view`. `seed` is
         what the command line handed the process on top of that, and is
         exported there, having arrived as environment. `physical` and
-        `monitor` are the process's own `set -P` and `set -m` states; see
-        `shell_wrapper`. `shell` names the
+        `monitor` are the process's own `set -P` and `set -m` states, and
+        `posix` its `Scope.posix`; see `shell_wrapper`. `shell` names the
         program the process is -- a shell, or `env` for what `env -S` runs --
         which settles `Scope.bash` and `Scope.zsh`, and `pwd`, for a shell,
         the directory it starts in as its PWD names it and whether that
@@ -3553,6 +3570,7 @@ class Scanner:
                 self.scope.lastpipe = False
                 self.scope.monitor = monitor
                 self.scope.physical = physical
+                self.scope.posix = posix
             if sealed:
                 self.scope.sealed = sealed
             if seed:
@@ -3743,6 +3761,21 @@ class Scanner:
         self.scope.assigns[name] = UNKNOWN
         if self.scope.allexport:
             self.scope.exported[name] = UNKNOWN
+        if name == "POSIXLY_CORRECT":
+            self.posix_mode(UNKNOWN)
+
+    def posix_mode(self, state):
+        """Records bash's POSIX mode as `state`, True, False or UNKNOWN, in a
+        shell that may be bash; see `Scope.posix`.
+
+        `set -o posix` and `set +o posix` turn the mode on and off, and so do
+        assigning POSIXLY_CORRECT and unsetting it; the other shells have no
+        such mode, and refuse that `set`. Where the variable got a value this
+        scan did not read, the mode is in doubt: a `for` binding it changes
+        nothing, while `read` or `((...))` turns it on.
+        """
+        if self.scope.bash is not False:
+            self.scope.posix = state
 
     def seal_opaque(self, cwd=False):
         """Puts every name, attribute and function in this scope in doubt.
@@ -3763,6 +3796,8 @@ class Scanner:
         self.functions_sealed = True
         self.possibly_unset = set()
         self.seals += 1
+        # POSIXLY_CORRECT is among the names, and bash's POSIX mode follows it.
+        self.posix_mode(UNKNOWN)
         if cwd:
             self.leave_cwd()
 
@@ -4216,7 +4251,7 @@ class Scanner:
             self.calling.discard(name)
 
     def call_listed(self, cmd, fields, start, split, conditional, follows,
-                    word):
+                    word, passed=False):
         """Runs the call to `word`, a function this text defined.
 
         One an `unset -f` may have removed may also be gone by the call, and
@@ -4228,6 +4263,13 @@ class Scanner:
         `bd() { cd /ext; command bd close X; }; t && unset -f bd`, `bd close
         X` writes /ext or the store it walks up to from where it started.
 
+        `passed` says the shell may pass the function by for the special
+        builtin of its name, its POSIX mode being unknown; see
+        `function_first`. That builtin is read the same way, with the
+        function still defined: after `unset() { :; }; t && set -o posix`,
+        `unset BEADS_DIR; bd close X` may run with or without the BEADS_DIR
+        it inherited.
+
         One defined over an earlier one on a path the shell may not take may
         still have the earlier body by the call, and each body is read the
         same way: after `h() { cd /ext; }; t && h() { :; }`, `h; bd -C store
@@ -4238,7 +4280,9 @@ class Scanner:
         g() { bd -C /ext close X; }`, `t && g() { unset -f bd; }; g` writes
         nothing either way, and `t && g() { . ./defs.sh; bd() { :; }; };
         unset -f bd; g` may run the program and write /ext, where reading the
-        old body after the new found the new one's `bd`.
+        old body after the new found the new one's `bd`. So does a builtin
+        read in place of the call: after `g() { cd /ext; }; eval() { unset -f
+        g; }; t && unset -f eval`, `eval g` may still run `g`.
 
         With the table in doubt, the command run with no function of that
         name listed may still run one, which `call` reads as a function it
@@ -4264,7 +4308,7 @@ class Scanner:
         # took 11s, while the steps charged for it stayed few.
         if word in self.calling:
             bodies = bodies[:1]
-        if not possibly_unset and len(bodies) == 1:
+        if not possibly_unset and not passed and len(bodies) == 1:
             self.call_function(word, bodies[0], self.prefix_seed(cmd))
             return
         before = self.scope.child()
@@ -4274,14 +4318,15 @@ class Scanner:
         for i, entry in enumerate(bodies):
             self.call_function(word, entry, seed, before if i else None)
             self.join_reading(joined, table)
-        if possibly_unset:
-            del self.functions[word]
+        if possibly_unset or passed:
+            if possibly_unset:
+                del self.functions[word]
             unread = self.functions_sealed and \
                 word not in ("builtin", "command")
 
             def run():
                 self.run_command(cmd, fields, start, split, conditional,
-                                 follows)
+                                 follows, passed=True)
                 if unread:
                     self.seal_sourced()
 
@@ -4445,6 +4490,8 @@ class Scanner:
         if replaces_value(arg):
             self.forget(name)
             return
+        if name == "POSIXLY_CORRECT":
+            self.posix_mode(UNKNOWN if conditional else True)
         self.scope.assigns[name] = (UNKNOWN if conditional
                                     else self.assign_value(arg))
         if self.scope.allexport is UNKNOWN:
@@ -4509,9 +4556,10 @@ class Scanner:
         if unread:
             self.seal_sourced()
 
-    def run_command(self, cmd, fields, start, split, conditional, follows):
+    def run_command(self, cmd, fields, start, split, conditional, follows,
+                    passed=False):
         """Runs the command `fields` spell where its wrappers put it, and with
-        the PWD it was given; see `call`."""
+        the PWD it was given; see `call`. `passed` is for `dispatch`."""
         # A wrapper may run the command in a directory of its own, and which
         # store `bd` selects turns on the directory it runs in. Applied here,
         # once, around every reader below rather than at each of them: the
@@ -4553,13 +4601,14 @@ class Scanner:
             self.callers[id(cmd)] = self.scope
             try:
                 run(lambda: self.dispatch(cmd, fields, start, split,
-                                          conditional, follows, cwd, spelled))
+                                          conditional, follows, cwd, spelled,
+                                          passed))
             finally:
                 self.callers.pop(id(cmd), None)
                 self.leader = leader
         else:
             self.dispatch(cmd, fields, start, split, conditional, follows,
-                          None)
+                          None, passed=passed)
 
     def wrapper_pwd(self, cmd, args, end, cwd, posix=False):
         """The directory the wrappers moved the command to, as it names it,
@@ -4670,14 +4719,29 @@ class Scanner:
             return UNKNOWN
         return self.command_env(cmd, args, last, "PWD")
 
+    def function_first(self, name):
+        """Whether this shell finds a function named `name` before the
+        builtin of that name: True, False or UNKNOWN.
+
+        A function comes first, except that a shell in POSIX mode finds a
+        special builtin before it: after `unset() { cd /ext; }`, `unset X`
+        runs the function in bash, and the builtin under `set -o posix`. See
+        `Scope.posix`.
+        """
+        if name not in SPECIAL_BUILTINS:
+            return True
+        posix = self.scope.posix
+        return UNKNOWN if posix is UNKNOWN else not posix
+
     def dispatch(self, cmd, fields, start, split, conditional, follows, cwd,
-                 spelled=True):
+                 spelled=True, passed=False):
         """Hands the command at `fields[start]` to the reader that knows it.
 
         `cwd` is the directory a wrapper runs it in, or None when it runs here,
         and `spelled` whether its PWD spelling is known. Applied to this frame
         rather than passed on, so every reader below -- and every scope nested
-        inside them -- resolves against it.
+        inside them -- resolves against it. `passed` says a function named
+        first is passed by for the builtin of its name; see `call_listed`.
         """
         if cwd is not None:
             if cwd is UNKNOWN:
@@ -4709,6 +4773,23 @@ class Scanner:
             return
         if name != word and name in SHELL_STATE_WORDS:
             return
+
+        # A call runs the body defined earlier in this text, and runs it here,
+        # where the cwd is known. Without this a relative store named inside a
+        # function was reported by nothing: the definition cannot resolve it and
+        # the call did not look. Only a command named first is one: `command`
+        # and every other wrapper run a program, so `bd() { command bd -C /ext
+        # close X; }; bd` writes /ext. A function is found before a builtin of
+        # the same name, so one named after a builtin read below is called
+        # rather than read: after `cd() { builtin cd /ext; }`, `cd /known; bd
+        # close X` writes /ext. A special builtin may come first instead; see
+        # `function_first`.
+        if start == 0 and not passed and word in self.functions:
+            first = self.function_first(name)
+            if first is not False:
+                self.call_listed(cmd, fields, start, split, conditional,
+                                 follows, word, passed=first is UNKNOWN)
+                return
 
         # After a startup or sourced file, a builtin read for what it does to
         # this shell may be a function that file defined, which may do
@@ -4779,17 +4860,6 @@ class Scanner:
 
         if name == "printf":
             self.printf_builtin(fields, start)
-            return
-
-        # A call runs the body defined earlier in this text, and runs it here,
-        # where the cwd is known. Without this a relative store named inside a
-        # function was reported by nothing: the definition cannot resolve it and
-        # the call did not look. Only a command named first is one: `command`
-        # and every other wrapper run a program, so `bd() { command bd -C /ext
-        # close X; }; bd` writes /ext.
-        if start == 0 and word in self.functions:
-            self.call_listed(cmd, fields, start, split, conditional, follows,
-                             word)
             return
 
         if name != "bd":
@@ -5297,6 +5367,8 @@ class Scanner:
             if refused is True:
                 continue
             self.unset_names.add(name)
+            if name == "POSIXLY_CORRECT":
+                self.posix_mode(UNKNOWN if conditional else False)
             if conditional or refused is UNKNOWN:
                 self.scope.assigns[name] = UNKNOWN
                 self.scope.exported[name] = UNKNOWN
@@ -5387,22 +5459,25 @@ class Scanner:
             i += 1
 
     def set_builtin(self, args, start, conditional):
-        """Records `set -a`/`+a`, `set -m`/`+m` and `set -P`/`+P`.
+        """Records `set -a`/`+a`, `set -m`/`+m`, `set -P`/`+P` and `set -o
+        posix`/`+o posix`.
 
         Under `set -a` every assignment exports its name, so `set -a;
         BEADS_DIR=/x/.beads; bd close X` runs `bd` with that BEADS_DIR though
         nothing said `export`. `set -m` turns job control on, which switches
         `lastpipe` off again; see `Scope.last_member_stays`. `set -P` makes
-        every later `cd` resolve symlinks before `..`; see `cd_dest`. Only
-        those three are read; the rest of `set` says nothing about which store
-        a command opens.
+        every later `cd` resolve symlinks before `..`; see `cd_dest`. `set -o
+        posix` makes a special builtin come before a function of its name;
+        see `posix_mode`. Only those four are read; the rest of `set` says
+        nothing about which store a command opens.
         """
         state = {}
+        unread = dict.fromkeys(("a", "m", "P", "posix"), UNKNOWN)
         i = start + 1
         while i < len(args):
             word = args[i].value
             if word is UNKNOWN:
-                state = {"a": UNKNOWN, "m": UNKNOWN, "P": UNKNOWN}
+                state = dict(unread)
                 i += 1
                 continue
             if word == "--" or not (word.startswith("-") or
@@ -5423,9 +5498,11 @@ class Scanner:
                         continue
                     option = args[i + taken].value
                     if option is UNKNOWN:
-                        state = {"a": UNKNOWN, "m": UNKNOWN, "P": UNKNOWN}
+                        state = dict(unread)
                     elif option in SET_O_LETTERS:
                         state[SET_O_LETTERS[option]] = on
+                    elif option == "posix":
+                        state["posix"] = on
             i += 1 + taken
         if "a" in state:
             self.scope.allexport = UNKNOWN if conditional else state["a"]
@@ -5433,6 +5510,8 @@ class Scanner:
             self.scope.monitor = UNKNOWN if conditional else state["m"]
         if "P" in state:
             self.scope.physical = UNKNOWN if conditional else state["P"]
+        if "posix" in state:
+            self.posix_mode(UNKNOWN if conditional else state["posix"])
 
     def shopt_builtin(self, args, start, conditional):
         """Records `shopt -s lastpipe` and `shopt -u lastpipe`.
@@ -5441,11 +5520,11 @@ class Scanner:
         `shopt -s lastpipe; true | cd /external; bd close X` writes
         /external's store where a scan that put every member in a subshell
         restored the old cwd. `-o` makes `shopt` a spelling of `set -o`, so
-        `shopt -so allexport` is `set -a`, `shopt -so physical` is `set -P`
-        and `shopt -so monitor` is `set -m`, which puts the last member of a
-        pipeline back in a subshell. Without `-s` or `-u` the builtin only
-        reports, and the rest of `shopt`'s options say nothing about which
-        store a command opens.
+        `shopt -so allexport` is `set -a`, `shopt -so physical` is `set -P`,
+        `shopt -so monitor` is `set -m`, which puts the last member of a
+        pipeline back in a subshell, and `shopt -so posix` is `set -o posix`.
+        Without `-s` or `-u` the builtin only reports, and the rest of
+        `shopt`'s options say nothing about which store a command opens.
         """
         setting = None
         set_o = False
@@ -5482,6 +5561,8 @@ class Scanner:
                 self.scope.physical = UNKNOWN
             if set_o or "monitor" in names:
                 self.scope.monitor = UNKNOWN
+            if set_o or "posix" in names:
+                self.posix_mode(UNKNOWN)
             if not set_o:
                 self.scope.lastpipe = UNKNOWN
             return
@@ -5495,6 +5576,8 @@ class Scanner:
                 self.scope.physical = value
             if "monitor" in names:
                 self.scope.monitor = value
+            if "posix" in names:
+                self.posix_mode(value)
         elif "lastpipe" in names:
             self.scope.lastpipe = value
 
@@ -5669,6 +5752,17 @@ class Scanner:
             monitor = False
         else:
             monitor = UNKNOWN
+        # A special builtin comes before a function of its name in bash's
+        # POSIX mode, which bash as `sh` starts in whatever `+o posix` says,
+        # and in the shells that refuse to define such a function; zsh finds
+        # the function first. See `Scope.posix`.
+        if shell == "zsh":
+            posix = False
+        elif bash_kind(shell) is True:
+            posix = self.bash_posix(cmd, args, start, words,
+                                    inherited["posix"])
+        else:
+            posix = True
         startup = self.startup_runs(cmd, args, start, words, privileged,
                                     interactive, inherited["posix"])
         leader = self.leader
@@ -5679,7 +5773,8 @@ class Scanner:
                              pwd=self.shell_pwd(cmd, args, start),
                              startup=startup,
                              functions=self.imported_functions(
-                                 shell, sealed, privileged, seed))
+                                 shell, sealed, privileged, seed),
+                             posix=posix)
         finally:
             self.leader = leader
 
@@ -5711,11 +5806,10 @@ class Scanner:
 
         An interactive shell in POSIX mode reads the file ENV names in place
         of `.bashrc`, `--norc` or not, unless privileged: `ENV=/tmp/s.sh bash
-        --posix --norc -i -c ...` runs it. POSIXLY_CORRECT puts bash in that
-        mode whatever a `+o posix` says, and so does `inherited`, a SHELLOPTS
-        listing `posix` that a privileged shell has not ignored: `env
-        SHELLOPTS=posix ENV=/tmp/s.sh bash --norc -i -c ...` runs the file,
-        and `env SHELLOPTS=posix BASH_ENV=/tmp/s.sh bash -c ...` none.
+        --posix --norc -i -c ...` runs it. Whether it is in that mode is read
+        as `bash_posix` reads it from `inherited`: `env SHELLOPTS=posix
+        ENV=/tmp/s.sh bash --norc -i -c ...` runs the file, and `env
+        SHELLOPTS=posix BASH_ENV=/tmp/s.sh bash -c ...` none.
 
         A wrapper may make it a login shell too, by the name it runs it
         under; see `argv0_login`.
@@ -5734,19 +5828,7 @@ class Scanner:
         if login is not False and \
                 self.shell_option(words, "", "noprofile") is not True:
             return True
-        option = self.shell_option(words, "", "posix")
-        variable = self.command_env(cmd, args, start, "POSIXLY_CORRECT")
-        if variable is not None and variable is not UNKNOWN:
-            variable = True
-        elif variable is None:
-            variable = False
-        states = {option, variable, inherited}
-        if True in states:
-            posix = True
-        elif UNKNOWN in states:
-            posix = UNKNOWN
-        else:
-            posix = False
+        posix = self.bash_posix(cmd, args, start, words, inherited)
         if interactive is not False:
             if interactive is UNKNOWN:
                 return True
@@ -5768,6 +5850,28 @@ class Scanner:
                 args[j].value.rsplit("/", 1)[-1] == "sudo" for j in found):
             return False
         return env is not None and env != ""
+
+    def bash_posix(self, cmd, args, start, words, inherited):
+        """Whether the bash at `args[start]`, with options `words`, starts in
+        POSIX mode: True, False or UNKNOWN.
+
+        `--posix` and `-o posix` turn it on, as the last word on it says; see
+        `startup_runs`. POSIXLY_CORRECT puts bash in that mode whatever a `+o
+        posix` says, and so does `inherited`, a SHELLOPTS listing `posix` that
+        a privileged shell has not ignored.
+        """
+        option = self.shell_option(words, "", "posix")
+        variable = self.command_env(cmd, args, start, "POSIXLY_CORRECT")
+        if variable is not None and variable is not UNKNOWN:
+            variable = True
+        elif variable is None:
+            variable = False
+        states = {option, variable, inherited}
+        if True in states:
+            return True
+        if UNKNOWN in states:
+            return UNKNOWN
+        return False
 
     def posix_startup_runs(self, cmd, args, start, words, name, interactive):
         """Whether `sh`, `dash`, `ksh` or `mksh` may run a startup file before
@@ -5898,23 +6002,20 @@ class Scanner:
 
         Only an exported one reaches a child. bash keeps its SHELLOPTS in step
         with its options, so that carries the option as it stands now: `export
-        SHELLOPTS; set -P; bash -c ...` starts the child physical, and `export
-        SHELLOPTS; set -m; bash -c ...` with job control, while a `set +P`
-        before it starts the child logical whatever was inherited. Any other
-        shell holds SHELLOPTS as the plain variable it inherited or was given,
-        which its own options do not touch: `env SHELLOPTS=physical dash -c
-        'bash -c ...'` starts that bash physical.
+        SHELLOPTS; set -P; bash -c ...` starts the child physical, `export
+        SHELLOPTS; set -m; bash -c ...` with job control, and `export
+        SHELLOPTS; POSIXLY_CORRECT=1; bash -c ...` in POSIX mode, while a
+        `set +P` before it starts the child logical whatever was inherited.
+        Any other shell holds SHELLOPTS as the plain variable it inherited or
+        was given, which its own options do not touch: `env
+        SHELLOPTS=physical dash -c 'bash -c ...'` starts that bash physical.
         """
         exported = self.is_exported("SHELLOPTS")
         if exported is not True:
             return exported
         answers = set()
         if self.scope.bash is not False:
-            # This scan does not follow bash's own POSIX mode, which `set -o
-            # posix` turns on and so does assigning POSIXLY_CORRECT, so what
-            # its SHELLOPTS says of `posix` is in doubt.
-            answers.add(UNKNOWN if option == "posix"
-                        else getattr(self.scope, option))
+            answers.add(getattr(self.scope, option))
         if self.scope.bash is not True:
             answers.add(opts_option(self.shell_var("SHELLOPTS"), option))
         return answers.pop() if len(answers) == 1 else UNKNOWN
@@ -6105,7 +6206,7 @@ class Scanner:
     def scan_script(self, script, seed=None, sealed=False, cwd=None,
                     known=None, conditional=False, frame="subshell",
                     process=False, physical=False, monitor=False, shell=None,
-                    pwd=None, startup=False, functions=None):
+                    pwd=None, startup=False, functions=None, posix=False):
         """Scans `script` as shell text, in a scope of its own.
 
         The text is parsed afresh, so its offsets index it and not the command
@@ -6130,7 +6231,7 @@ class Scanner:
                           conditional=conditional, frame=frame,
                           process=process, physical=physical,
                           monitor=monitor, shell=shell, pwd=pwd,
-                          startup=startup, functions=functions)
+                          startup=startup, functions=functions, posix=posix)
         finally:
             self.scripts.discard(script)
 

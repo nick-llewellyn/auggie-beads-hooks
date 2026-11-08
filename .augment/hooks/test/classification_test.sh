@@ -2307,6 +2307,13 @@ check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { 
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; shopt -so posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; POSIXLY_CORRECT=1; cd $STORE; unset BEADS_DIR; bd close CHR-1"
 check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; unset() { :; }; POSIXLY_CORRECT=1; builtin unset POSIXLY_CORRECT; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+# So does every other special builtin, though the scan reads nothing from
+# it: `:`, `trap`, a quoted `export` and a `return` inside a function.
+check_target "$STORE" ":() { builtin cd $STORE/nested/inner; }; set -o posix; cd $STORE; :; bd close CHR-1"
+check_unresolved ":() { builtin cd $STORE/nested/inner; }; cd $STORE; :; bd close CHR-1"
+check_target "$STORE" "trap() { builtin cd $STORE/nested/inner; }; set -o posix; cd $STORE; trap '' HUP; bd close CHR-1"
+check_target "$STORE" "function export { builtin cd $STORE/nested/inner; }; set -o posix; cd $STORE; \\export CS_X=1; bd close CHR-1"
+check_target "$STORE" "return() { builtin cd $STORE/nested/inner; }; set -o posix; cs_f() { return; }; cd $STORE; cs_f; bd close CHR-1"
 # A shell starts in that mode as bash's options and environment say, and as
 # `sh`; zsh finds the function first.
 check_target '/tmp/store' "cd $STORE; BEADS_DIR=/tmp/store/.beads bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"

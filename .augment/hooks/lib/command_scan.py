@@ -429,10 +429,12 @@ SOURCE_WORDS = {"source", "."}
 # the shell: `/usr/bin/cd /decoy; bd close X` writes the store it started in.
 SHELL_STATE_WORDS = CHDIR_WORDS | set(READ_WORDS) | {
     "unset", "set", "shopt", "eval", "getopts", "printf"}
-# The special builtins among those read here, which a shell in POSIX mode
-# finds before a function of the same name; see `Scope.posix`. bash treats
-# `source` as it treats `.`.
-SPECIAL_BUILTINS = SOURCE_WORDS | {"unset", "set", "eval"}
+# The POSIX special builtins, which a shell in POSIX mode finds before a
+# function of the same name, whether this scan reads the builtin or not; see
+# `Scope.posix`. bash treats `source` as it treats `.`.
+SPECIAL_BUILTINS = SOURCE_WORDS | {
+    ":", "break", "continue", "eval", "exec", "exit", "export", "readonly",
+    "return", "set", "shift", "times", "trap", "unset"}
 # The `set -o` names of the options `set` is read for, by the letter that is
 # their short form; see `set_builtin`.
 SET_O_LETTERS = {"allexport": "a", "monitor": "m", "physical": "P"}

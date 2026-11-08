@@ -3779,6 +3779,30 @@ class Scanner:
         if self.scope.bash is not False:
             self.scope.posix = state
 
+    def posix_option(self, state):
+        """Records POSIX mode as `set -o posix` or `set +o posix` leaves it,
+        `state` being True, False or UNKNOWN; see `posix_mode`.
+
+        bash keeps POSIXLY_CORRECT in step with the option: turning it on
+        sets the variable to `y` where it was unset, exported only under `set
+        -a`, and turning it off unsets it, export and all. So after `export
+        POSIXLY_CORRECT=1; set +o posix`, `bash -c ...` starts out of POSIX
+        mode, and after `set -o posix; export POSIXLY_CORRECT` in it.
+        """
+        self.posix_mode(state)
+        if self.scope.bash is False:
+            return
+        name = "POSIXLY_CORRECT"
+        if state is False:
+            self.unset_names.add(name)
+            self.scope.assigns[name] = UNSET
+            self.scope.exported[name] = False
+        elif state is UNKNOWN:
+            self.scope.assigns[name] = UNKNOWN
+            self.scope.exported[name] = UNKNOWN
+        elif self.shell_var(name) is None:
+            self.bind(name, "y")
+
     def seal_opaque(self, cwd=False):
         """Puts every name, attribute and function in this scope in doubt.
 
@@ -4084,7 +4108,8 @@ class Scanner:
         self.forget(name)
 
     def bind(self, name, value):
-        """Gives `name` the `value` a `for` binds, exported under `set -a`."""
+        """Gives `name` the `value` a `for` binds, or `posix_option` sets,
+        exported under `set -a`."""
         self.scope.assigns[name] = value
         if self.scope.allexport is UNKNOWN:
             self.scope.exported[name] = UNKNOWN
@@ -5486,7 +5511,7 @@ class Scanner:
         `lastpipe` off again; see `Scope.last_member_stays`. `set -P` makes
         every later `cd` resolve symlinks before `..`; see `cd_dest`. `set -o
         posix` makes a special builtin come before a function of its name;
-        see `posix_mode`. Only those four are read; the rest of `set` says
+        see `posix_option`. Only those four are read; the rest of `set` says
         nothing about which store a command opens.
         """
         state = {}
@@ -5529,7 +5554,7 @@ class Scanner:
         if "P" in state:
             self.scope.physical = UNKNOWN if conditional else state["P"]
         if "posix" in state:
-            self.posix_mode(UNKNOWN if conditional else state["posix"])
+            self.posix_option(UNKNOWN if conditional else state["posix"])
 
     def shopt_builtin(self, args, start, conditional):
         """Records `shopt -s lastpipe` and `shopt -u lastpipe`.
@@ -5580,7 +5605,7 @@ class Scanner:
             if set_o or "monitor" in names:
                 self.scope.monitor = UNKNOWN
             if set_o or "posix" in names:
-                self.posix_mode(UNKNOWN)
+                self.posix_option(UNKNOWN)
             if not set_o:
                 self.scope.lastpipe = UNKNOWN
             return
@@ -5595,7 +5620,7 @@ class Scanner:
             if "monitor" in names:
                 self.scope.monitor = value
             if "posix" in names:
-                self.posix_mode(value)
+                self.posix_option(value)
         elif "lastpipe" in names:
             self.scope.lastpipe = value
 

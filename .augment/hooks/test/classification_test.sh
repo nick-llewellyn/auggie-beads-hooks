@@ -2339,6 +2339,10 @@ check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; set -
 check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; set -o posix -a; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
 check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; export POSIXLY_CORRECT=1; set +o posix -o posix; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
 check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; shopt -so posix allexport; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+# A wrapper running bash as `sh` starts it in POSIX mode too, and then it
+# reads no BASH_ENV.
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; cd $STORE; exec -a sh bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "cd $STORE; BASH_ENV=/tmp/select-store.sh exec -a sh bash -c 'bd close CHR-1'"
 # A builtin read in place of a call reads the function table from before it,
 # whatever the body did to the table.
 check_unresolved "cd $STORE; cs_g() { builtin cd $STORE/nested/inner; }; eval() { unset -f cs_g; }; t && unset -f eval; eval cs_g; bd close CHR-1"

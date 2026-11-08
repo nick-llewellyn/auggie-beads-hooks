@@ -5914,7 +5914,8 @@ class Scanner:
         `--posix` and `-o posix` turn it on, as the last word on it says; see
         `startup_runs`. POSIXLY_CORRECT puts bash in that mode whatever a `+o
         posix` says, and so does `inherited`, a SHELLOPTS listing `posix` that
-        a privileged shell has not ignored.
+        a privileged shell has not ignored, and so does a wrapper running it
+        as `sh`; see `argv0_sh`.
         """
         option = self.shell_option(words, "", "posix")
         variable = self.command_env(cmd, args, start, "POSIXLY_CORRECT")
@@ -5922,7 +5923,7 @@ class Scanner:
             variable = True
         elif variable is None:
             variable = False
-        states = {option, variable, inherited}
+        states = {option, variable, inherited, self.argv0_sh(args, start)}
         if True in states:
             return True
         if UNKNOWN in states:
@@ -5973,13 +5974,45 @@ class Scanner:
         macOS ships does so only when interactive, so `startup_runs` takes
         such a shell for one that may.
         """
+        argv0, dash = self.wrapper_argv0(args, start)
+        if dash is True:
+            return True
+        if argv0 is UNKNOWN or dash is UNKNOWN:
+            return UNKNOWN
+        return argv0 is not None and argv0.startswith("-")
+
+    def argv0_sh(self, args, start):
+        """Whether the wrapper that runs the bash at `args[start]` names it
+        `sh`, which puts it in POSIX mode as being run as `sh` does: True,
+        False or UNKNOWN.
+
+        bash reads the last component of the name, past one leading `-`, so
+        `exec -a sh bash -c ...`, `exec -a /bin/sh bash -c ...` and `env
+        --argv0=-sh bash -c ...` all run in that mode; see `argv0_login`.
+        """
+        argv0 = self.wrapper_argv0(args, start)[0]
+        if argv0 is UNKNOWN:
+            return UNKNOWN
+        if argv0 is None:
+            return False
+        name = argv0.rsplit("/", 1)[-1]
+        return (name[1:] if name.startswith("-") else name) == "sh"
+
+    def wrapper_argv0(self, args, start):
+        """The name the last wrapper before `args[start]` runs it under, and
+        whether `exec -l` puts a `-` before that, as `(argv0, dash)`.
+
+        `argv0` is None where no wrapper names it, so it runs under its own
+        name, and both are UNKNOWN where the wrapper cannot be read. Only the
+        last wrapper counts; see `argv0_login`.
+        """
         found = self.wrapper_words(args, start)
         if not found:
-            return False if found == [] else UNKNOWN
+            return (None, False) if found == [] else (UNKNOWN, UNKNOWN)
         i = found[-1]
         name = args[i].value.rsplit("/", 1)[-1]
         if name not in ("exec", "env"):
-            return False
+            return None, False
         takes, alone = WRAPPER_OPT_ARGS[name], WRAPPER_OPT_NOARG[name]
         dash, argv0 = False, None
         i += 1
@@ -5988,7 +6021,7 @@ class Scanner:
             if word is UNKNOWN:
                 if args[i].assign is not None:
                     break
-                return UNKNOWN
+                return UNKNOWN, UNKNOWN
             if word == "-" and name == "env":
                 i += 1
                 continue
@@ -6002,16 +6035,14 @@ class Scanner:
                 continue
             bundle = short_opts(word, takes, alone)
             if bundle is None:
-                return UNKNOWN
+                return UNKNOWN, UNKNOWN
             letters, opt, inline = bundle
             dash = dash or (name == "exec" and "l" in letters)
             if opt == "-a":
                 argv0 = inline if inline is not None else \
                     self.opt_value(args, i)
             i += 1 if opt is None or inline is not None else 2
-        if dash or argv0 is UNKNOWN:
-            return True if dash else UNKNOWN
-        return argv0 is not None and argv0.startswith("-")
+        return argv0, dash
 
     def shellopts_option(self, cmd, args, start, option):
         """Whether the shell at `args[start]` starts with `option` on from the

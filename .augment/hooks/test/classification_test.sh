@@ -2400,6 +2400,23 @@ check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset
 # the mode off.
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set -o posix; set - +o posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set -o posix; shopt -suo posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+# In POSIX mode a special builtin's prefix assignments outlive it, made
+# before it runs: bash exports them, dash keeps them unexported. `command`
+# takes that away, and outside POSIX mode they reach the builtin alone.
+check_target '/tmp/ext' "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads :; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; cd $STORE; BEADS_DIR=/tmp/ext/.beads :; bd close CHR-1"
+check_unresolved "unset BEADS_DIR BEADS_DB; t && set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads :; bd close CHR-1"
+check_target '/tmp/ext' "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads export CS_X=1; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads command :; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; set -o posix; export BEADS_DIR=/tmp/ext/.beads; cd $STORE; BEADS_DIR=/tmp/x unset BEADS_DIR; bd close CHR-1"
+check_target '/tmp/ext' "dash -c 'OUT=/tmp/a; OUT=/tmp/ext :; bd -C \"\$OUT\" close CHR-1'"
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; cd $STORE; dash -c 'BEADS_DIR=/tmp/ext/.beads :; bd close CHR-1'"
+# A function call's are kept in POSIX mode by bash 3.2 and ksh and restored by
+# bash 5.2 and dash, so they are in doubt after the call unless the mode is
+# known to be off.
+check_unresolved "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; cs_f() { :; }; BEADS_DIR=/tmp/ext/.beads cs_f; bd close CHR-1"
+check_unresolved 'set -o posix; OUT=/tmp/a; cs_f() { :; }; OUT=/tmp/ext cs_f; bd -C "$OUT" close CHR-1'
+check_target '/tmp/a' 'OUT=/tmp/a; cs_f() { :; }; OUT=/tmp/ext cs_f; bd -C "$OUT" close CHR-1'
 # A wrapper running bash as `sh` starts it in POSIX mode too, and then it
 # reads no BASH_ENV.
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; cd $STORE; exec -a sh bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"

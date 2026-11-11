@@ -4281,6 +4281,7 @@ class Scanner:
                 self.scope.exported[each] = value is not UNSET
             outer_unset, self.unset_names = self.unset_names, set()
             seals = self.seals
+            posix = self.scope.posix
             outer_text, outer_raw = self.text, self.raw
             self.text, self.raw = text, raw
             try:
@@ -4289,8 +4290,12 @@ class Scanner:
                 self.text, self.raw = outer_text, outer_raw
                 unset = self.unset_names
                 self.unset_names = outer_unset | unset
+                # In POSIX mode, bash 3.2 and ksh keep a call's prefix
+                # assignments after it, where bash 5.2 and dash restore them,
+                # so they are in doubt unless the mode was off throughout.
+                kept = posix is not False or self.scope.posix is not False
                 for each, (value, exported) in before.items():
-                    if each in unset or self.seals != seals:
+                    if each in unset or self.seals != seals or kept:
                         self.scope.assigns[each] = UNKNOWN
                         self.scope.exported[each] = UNKNOWN
                         continue
@@ -4632,9 +4637,39 @@ class Scanner:
         if any((arg.get("Name") or {}).get("Value") == "POSIXLY_CORRECT"
                for arg in assigns):
             self.posix_mode(UNKNOWN)
+        if start == 0 and assigns and first in SPECIAL_BUILTINS:
+            self.special_prefix(cmd, conditional)
         self.run_command(cmd, fields, start, split, conditional, follows)
         if unread:
             self.seal_sourced()
+
+    def special_prefix(self, cmd, conditional):
+        """Makes the prefix assignments of the special builtin `cmd` runs
+        assignments of this shell, where they outlive it.
+
+        In POSIX mode they do, as POSIX requires: after `set -o posix;
+        BEADS_DIR=/ext/.beads :`, `bd close X` writes /ext. bash 3.2 and 5.2
+        export them as well; dash and ksh keep them as shell variables. They
+        are made before the builtin runs, so `X=1 unset X` leaves X unset.
+        Outside POSIX mode, or through `command` or `builtin`, which the
+        caller rules out, they reach the builtin alone. Where the mode is in
+        doubt, so is every name assigned.
+        """
+        posix = self.scope.posix
+        if posix is False:
+            return
+        bash = self.scope.bash
+        for name, value in self.prefix_values(cmd).items():
+            if posix is UNKNOWN or conditional:
+                value = UNKNOWN
+            self.scope.assigns[name] = value
+            if name == "POSIXLY_CORRECT":
+                self.posix_mode(UNKNOWN if value is UNKNOWN else True)
+            if posix is UNKNOWN or bash is UNKNOWN or \
+                    self.scope.allexport is UNKNOWN:
+                self.scope.exported[name] = UNKNOWN
+            elif bash is True or self.scope.allexport:
+                self.scope.exported[name] = True
 
     def run_command(self, cmd, fields, start, split, conditional, follows,
                     passed=False):

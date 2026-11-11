@@ -5551,8 +5551,10 @@ class Scanner:
                 unread()
                 i += 1
                 continue
-            if word == "--" or not (word.startswith("-") or
-                                    word.startswith("+")):
+            # A lone `-` ends the options as `--` does: `set - -a` makes `-a`
+            # the first operand and leaves allexport as it was.
+            if word in ("--", "-") or not (word.startswith("-") or
+                                           word.startswith("+")):
                 break
             # Read letter by letter, as bash does: each `o`, bundled or not,
             # takes the next word as an option's name, so `set -eo physical`
@@ -5590,6 +5592,7 @@ class Scanner:
         `shopt`'s options say nothing about which store a command opens.
         """
         setting = None
+        refused = False
         set_o = False
         flag_unread = False
         names = []
@@ -5606,14 +5609,20 @@ class Scanner:
                 break
             if word.startswith("-") and len(word) > 1:
                 if "s" in word[1:]:
+                    refused = refused or setting is False
                     setting = True
                 if "u" in word[1:]:
+                    refused = refused or setting is True
                     setting = False
                 if "o" in word[1:]:
                     set_o = True
                 i += 1
                 continue
             break
+        # bash refuses `-s` with `-u` and changes nothing: after `shopt -so
+        # allexport; shopt -s -u -o allexport`, allexport is still on.
+        if refused:
+            return
         while i < len(args):
             names.append(args[i].value)
             i += 1

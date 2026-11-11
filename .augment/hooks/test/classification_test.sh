@@ -1745,6 +1745,11 @@ check_target "$STORE" "cd $STORE; shopt -so allexport; shopt -uo allexport; BEAD
 check_unresolved "cd $STORE; set \$CS_OPTS -a; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
 check_unresolved "cd $STORE; shopt \$CS_OPTS; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
 check_target "$STORE/nested/inner" "cd $STORE; set -a -- \$CS_OPTS; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+# A lone `-` ends `set`'s options as `--` does, so `-a` after it is an
+# operand. `shopt` refuses `-s` with `-u` and changes nothing.
+check_target "$STORE" "cd $STORE; set - -a; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+check_target "$STORE/nested/inner" "cd $STORE; shopt -so allexport; shopt -s -u -o allexport; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+check_target "$CD/other/store" "shopt -s lastpipe; shopt -su lastpipe; true | cd $CD/other; bd -C store close CHR-1"
 # The write itself is still found inside one, under the cwd in force there.
 check sync "true | bd close CHR-1"
 check_target "$CD/other/store" "cd $CD/other; true | bd -C store close CHR-1"
@@ -2362,6 +2367,10 @@ check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { 
 check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set \$CS_OPTS -o posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
 check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; shopt \$CS_OPTS; cd $STORE; unset BEADS_DIR; bd close CHR-1"
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set -o posix; set foo +o posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+# So does a lone `-`, and `shopt` refuses `-s` with `-u`, so neither turns
+# the mode off.
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set -o posix; set - +o posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set -o posix; shopt -suo posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
 # A wrapper running bash as `sh` starts it in POSIX mode too, and then it
 # reads no BASH_ENV.
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; cd $STORE; exec -a sh bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"

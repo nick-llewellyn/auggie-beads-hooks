@@ -5609,10 +5609,12 @@ class Scanner:
                 break
             if word.startswith("-") and len(word) > 1:
                 if "s" in word[1:]:
-                    refused = refused or setting is False
+                    refused = refused or (setting is False and
+                                          not flag_unread)
                     setting = True
                 if "u" in word[1:]:
-                    refused = refused or setting is True
+                    refused = refused or (setting is True and
+                                          not flag_unread)
                     setting = False
                 if "o" in word[1:]:
                     set_o = True
@@ -5620,7 +5622,10 @@ class Scanner:
                 continue
             break
         # bash refuses `-s` with `-u` and changes nothing: after `shopt -so
-        # allexport; shopt -s -u -o allexport`, allexport is still on.
+        # allexport; shopt -s -u -o allexport`, allexport is still on. Only
+        # flags before any word this scan cannot read count, since that word
+        # may end the flags: with X=allexport, `shopt -so "$X" -u` turns
+        # allexport on, `-u` being an option name there.
         if refused:
             return
         while i < len(args):

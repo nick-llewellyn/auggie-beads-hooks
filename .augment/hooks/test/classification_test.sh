@@ -1749,6 +1749,11 @@ check_target "$STORE/nested/inner" "cd $STORE; set -a -- \$CS_OPTS; BEADS_DIR=$S
 # operand. `shopt` refuses `-s` with `-u` and changes nothing.
 check_target "$STORE" "cd $STORE; set - -a; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
 check_target "$STORE/nested/inner" "cd $STORE; shopt -so allexport; shopt -s -u -o allexport; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+# A word `shopt` cannot read may end its flags, so a `-u` after one may be an
+# option name: with CS_OPTS=allexport, the first turns allexport on. Both
+# flags before such a word are still refused.
+check_unresolved "cd $STORE; CS_OPTS=\$(printf allexport); shopt -so \"\$CS_OPTS\" -u; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+check_target "$STORE/nested/inner" "cd $STORE; shopt -so allexport; shopt -s -u -o \"\$CS_OPTS\"; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
 check_target "$CD/other/store" "shopt -s lastpipe; shopt -su lastpipe; true | cd $CD/other; bd -C store close CHR-1"
 # The write itself is still found inside one, under the cwd in force there.
 check sync "true | bd close CHR-1"

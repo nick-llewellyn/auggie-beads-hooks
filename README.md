@@ -18,7 +18,7 @@ existing one.
 
 | Path | Purpose |
 | --- | --- |
-| `.augment/settings.json` | Routes SessionStart, PostToolUse (`launch-process`) and SessionEnd to the hooks. |
+| `.augment/settings.json` | Routes SessionStart, PostToolUse (`bash`) and SessionEnd to the hooks. |
 | `.augment/hooks/beads-prime.sh` | SessionStart: prints `bd prime` for the workspace. |
 | `.augment/hooks/beads-sync.sh` | PostToolUse and SessionEnd: commits, and optionally pushes, each store that was written. |
 | `.augment/hooks/lib/command-scan.sh` | Runs the scanner for `beads-sync.sh`. |
@@ -57,7 +57,7 @@ The hook reads the event as JSON on stdin: `hook_event_name`,
 `workspace_roots`, `tool_name`, `tool_input.command`, `tool_input.cwd` and
 `tool_input.wait`.
 
-On **PostToolUse** for `launch-process`, it scans the command. Any `bd` call
+On **PostToolUse** for the shell tool, it scans the command. Any `bd` call
 not known to be read-only counts as a write. The scanner also works out which
 store each call addresses: a workspace root, `bd -C <dir>`, `bd --db <path>`,
 `BEADS_DIR` or `BEADS_DB`, following `cd`, shell variables and wrappers such
@@ -65,6 +65,12 @@ as `env`, `xargs` and `bash -c`, and resolving symlinks as `bd`, `cd` and
 `cd -P` do. A read-only command such as `bd list` or `bd show` causes no
 sync. A command too deeply nested to scan within a few seconds is treated as
 a failed scan: the workspace roots are synced and the hook warns.
+
+Auggie CLI 1.2.0 renamed the shell tool from `launch-process` to `bash`, and
+passes each hook the name its matcher uses. `settings.json` matches `bash`;
+on an older CLI, set the matcher to `launch-process`. The hook accepts either
+name, so a copy whose matcher still says `launch-process`, which 1.x matches
+for now but flags as deprecated, keeps syncing.
 
 On **SessionEnd**, it syncs every workspace root that has a `.beads/`, and
 every recorded external store, without looking at any command. This catches

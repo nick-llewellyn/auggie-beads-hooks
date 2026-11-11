@@ -116,12 +116,13 @@ teardown() {
 # what a relative `-C` target resolves against. Empty by default, since the
 # field is optional on the real event. `$CONV` sets the `conversation_id`,
 # which is left out when empty. `$FIRE_WAIT`, `true` or `false`, sets the
-# launch's `wait`, which is left out when empty.
+# launch's `wait`, which is left out when empty. `$FIRE_TOOL` sets the
+# `tool_name`, `launch-process` by default.
 event_as() {
   local e="$1" c="$2"; shift 2
-  jq -n --arg e "$e" --arg w "$WS" --arg c "$c" \
+  jq -n --arg e "$e" --arg w "$WS" --arg c "$c" --arg n "${FIRE_TOOL:-launch-process}" \
     --arg d "${FIRE_CWD:-}" --arg v "${CONV:-}" --arg t "${FIRE_WAIT:-}" --args \
-    '{hook_event_name:$e, workspace_roots:([$w] + $ARGS.positional), tool_name:"launch-process", tool_input:({command:$c} + (if $d == "" then {} else {cwd:$d} end) + (if $t == "" then {} else {wait:($t == "true")} end))} + (if $v == "" then {} else {conversation_id:$v} end)' \
+    '{hook_event_name:$e, workspace_roots:([$w] + $ARGS.positional), tool_name:$n, tool_input:({command:$c} + (if $d == "" then {} else {cwd:$d} end) + (if $t == "" then {} else {wait:($t == "true")} end))} + (if $v == "" then {} else {conversation_id:$v} end)' \
     "$@"
 }
 
@@ -210,6 +211,21 @@ setup
 fire 'bd close CHR-1'
 [ "$(count commit)" -eq 1 ] && [ "$(count push)" -eq 1 ] && ! pending &&
   report ok || report bad "write: commit+push once, marker cleared (log: $(tr '\n' ',' <"$BD_LOG"))"
+teardown
+
+# --- Auggie 1.x's `bash` tool name syncs as `launch-process` does ------
+# Auggie passes each hook the tool name its matcher uses, so a `bash` matcher
+# delivers `bash`. Read as some other tool, the call is skipped before the
+# scan and the write stays local until SessionEnd. A call from any other tool
+# is still skipped.
+setup
+FIRE_TOOL=bash fire 'bd close CHR-1'
+[ "$(count commit)" -eq 1 ] && [ "$(count push)" -eq 1 ] && ! pending &&
+  report ok || report bad "bash tool: commit+push once, marker cleared (log: $(tr '\n' ',' <"$BD_LOG"))"
+: >"$BD_LOG"
+FIRE_TOOL=read fire 'bd close CHR-1'
+[ "$(count commit)" -eq 0 ] && [ "$(count push)" -eq 0 ] && report ok ||
+  report bad "a tool other than the shell must not sync (log: $(tr '\n' ',' <"$BD_LOG"))"
 teardown
 
 # --- a read-only command does not sync ---------------------------------

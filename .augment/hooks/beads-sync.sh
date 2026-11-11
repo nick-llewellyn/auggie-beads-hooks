@@ -1011,8 +1011,14 @@ HOOK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 . "$HOOK_DIR/lib/command-scan.sh"
 
 if [ "$EVENT_NAME" = "PostToolUse" ]; then
+  # Auggie CLI 1.2.0 renamed the shell tool from `launch-process` to `bash`,
+  # and hands each hook the name its matcher uses. A copy whose settings still
+  # match the old name, which 1.x matches for now, receives that one.
   TOOL_NAME=$(jq -r '.tool_name // ""' <<<"$EVENT_JSON")
-  [ "$TOOL_NAME" = "launch-process" ] || exit 0
+  case "$TOOL_NAME" in
+    bash | launch-process) ;;
+    *) exit 0 ;;
+  esac
 
   COMMAND=$(jq -r '.tool_input.command // ""' <<<"$EVENT_JSON")
   # The directory the tool call was launched from, and empty when the event does

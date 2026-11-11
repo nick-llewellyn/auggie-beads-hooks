@@ -2339,6 +2339,14 @@ check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; set -
 check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; set -o posix -a; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
 check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; export POSIXLY_CORRECT=1; set +o posix -o posix; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
 check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; shopt -so posix allexport; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+# Turning the option off unsets POSIXLY_CORRECT, so where it may have been
+# turned off -- on one path, or by a word the scan cannot read -- a value a
+# function assigns after it may outlive a call that set the variable for that
+# call only: with `t` true, bash 3.2 and 5.2 both run `bd -C /tmp/store`.
+check_unresolved 'POSIXLY_CORRECT=/tmp/a; cs_f() { t && set +o posix; POSIXLY_CORRECT=/tmp/store; }; POSIXLY_CORRECT=/tmp/a cs_f; bd -C "$POSIXLY_CORRECT" close CHR-1'
+check_unresolved 'POSIXLY_CORRECT=/tmp/a; cs_f() { t && shopt -uo posix; POSIXLY_CORRECT=/tmp/store; }; POSIXLY_CORRECT=/tmp/a cs_f; bd -C "$POSIXLY_CORRECT" close CHR-1'
+check_unresolved 'POSIXLY_CORRECT=/tmp/a; cs_f() { set +o $CS_OPTS; POSIXLY_CORRECT=/tmp/store; }; POSIXLY_CORRECT=/tmp/a cs_f; bd -C "$POSIXLY_CORRECT" close CHR-1'
+check_unresolved 'POSIXLY_CORRECT=/tmp/a; cs_f() { shopt -uo $CS_OPTS; POSIXLY_CORRECT=/tmp/store; }; POSIXLY_CORRECT=/tmp/a cs_f; bd -C "$POSIXLY_CORRECT" close CHR-1'
 # A wrapper running bash as `sh` starts it in POSIX mode too, and then it
 # reads no BASH_ENV.
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; cd $STORE; exec -a sh bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"

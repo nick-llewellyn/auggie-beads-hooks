@@ -3798,6 +3798,9 @@ class Scanner:
             self.scope.assigns[name] = UNSET
             self.scope.exported[name] = False
         elif state is UNKNOWN:
+            # `t && set +o posix` may have unset it, as a conditional `unset`
+            # may; see `call_function`.
+            self.unset_names.add(name)
             self.scope.assigns[name] = UNKNOWN
             self.scope.exported[name] = UNKNOWN
         elif self.shell_var(name) is None:

@@ -540,7 +540,7 @@ def _q(pattern):
 
     shfmt names the tokens in its errors in backticks, but only since 3.9 --
     3.8 uses double quotes for some and nothing for others, and 3.8 is what
-    `apt-get install shfmt` gives on the CI image. A pattern that requires one
+    `apt-get install shfmt` gives on Ubuntu 24.04. A pattern that requires one
     spelling matches nothing under the other, so no repair is found and a
     fragment that should parse is abandoned: the write is then reported with no
     target and its store goes unregistered, which is the silent outcome this

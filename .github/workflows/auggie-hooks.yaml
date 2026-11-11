@@ -60,14 +60,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # The scanner parses commands with `shfmt --to-json`; jq and python3 are
-      # already on both runner images. Unpinned on purpose: apt and brew ship
-      # different shfmt versions, and the suites cover both.
+      # already on both runner images. Ubuntu installs a pinned release binary
+      # (v3.12.0), checked against its SHA-256, so the leg does not depend on
+      # Ubuntu's apt mirrors; macOS takes brew's latest. The suites still cover
+      # two shfmt versions.
       - name: Install shfmt
+        env:
+          SHFMT_VERSION: v3.12.0
+          SHFMT_SHA256: d9fbb2a9c33d13f47e7618cf362a914d029d02a6df124064fff04fd688a745ea
         run: |
           if [ "$RUNNER_OS" = macOS ]; then
             HOMEBREW_NO_AUTO_UPDATE=1 brew install shfmt
           else
-            sudo apt-get update -y && sudo apt-get install -y shfmt
+            # The pinned binary and its checksum are for x86_64 only.
+            arch=$(uname -m)
+            if [ "$arch" != x86_64 ]; then
+              echo "::error::no pinned shfmt binary for $arch" >&2
+              exit 1
+            fi
+            curl -fsSL --retry 3 -o "$RUNNER_TEMP/shfmt" \
+              "https://github.com/mvdan/sh/releases/download/$SHFMT_VERSION/shfmt_${SHFMT_VERSION}_linux_amd64"
+            echo "$SHFMT_SHA256  $RUNNER_TEMP/shfmt" | sha256sum -c -
+            sudo install -m 0755 "$RUNNER_TEMP/shfmt" /usr/local/bin/shfmt
           fi
           shfmt --version
 

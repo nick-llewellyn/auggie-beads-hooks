@@ -298,10 +298,11 @@ Copy `.github/workflows/auggie-hooks.yaml` into the project's
   cannot be read (a manual run, a new branch, a force push), it reports a
   change. It uses `git diff` rather than a third-party filter action.
 - **`auggie-hooks`** runs only when `changes` reports a change, on
-  `ubuntu-latest` and `macos-latest`. It installs `shfmt` (apt on Ubuntu,
-  Homebrew on macOS, deliberately unpinned so the two legs cover different
-  versions), checks that the entry points are executable and every script
-  parses, and runs the three suites under `/bin/bash`.
+  `ubuntu-latest` and `macos-latest`. It installs `shfmt` (on Ubuntu, the
+  v3.12.0 release binary, checked against its SHA-256; on macOS, Homebrew's
+  latest, so the two legs cover different versions), checks that the entry
+  points are executable and every script parses, and runs the three suites
+  under `/bin/bash`.
 
 Each leg takes 8 to 10 minutes. On private repositories macOS minutes are
 billed at a higher rate, which is what the path filter is for.

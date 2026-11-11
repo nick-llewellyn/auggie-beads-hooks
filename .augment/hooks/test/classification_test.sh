@@ -2356,6 +2356,16 @@ check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; set -
 check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; set -o posix -a; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
 check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; export POSIXLY_CORRECT=1; set +o posix -o posix; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
 check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; shopt -so posix allexport; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+# A bash that starts in POSIX mode sets the variable, unexported, so `set -a;
+# set -o posix` finds it set: bash 3.2 sets it anew and exports it, 5.2 leaves
+# it unexported, so whether a child is in POSIX mode, and reads BASH_ENV, is
+# in doubt. The same holds for a variable a first `set -o posix` set. Exported
+# outright, it puts the child in POSIX mode.
+check_unresolved "cd $STORE; bash --posix -c 'set -a; set -o posix; BASH_ENV=/tmp/select-store.sh bash -c \"bd close CHR-1\"'"
+check_unresolved "cd $STORE; exec -a sh bash -c 'set -a; set -o posix; BASH_ENV=/tmp/select-store.sh bash -c \"bd close CHR-1\"'"
+check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; cd $STORE; bash --posix -c 'set -a; set -o posix; bash -c \"unset() { :; }; unset BEADS_DIR; bd close CHR-1\"'"
+check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; set -o posix; set -a; set -o posix; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; cd $STORE; bash --posix -c 'export POSIXLY_CORRECT; bash -c \"unset() { :; }; unset BEADS_DIR; bd close CHR-1\"'"
 # Turning the option off unsets POSIXLY_CORRECT, so where it may have been
 # turned off -- on one path, or by a word the scan cannot read -- a value a
 # function assigns after it may outlive a call that set the variable for that

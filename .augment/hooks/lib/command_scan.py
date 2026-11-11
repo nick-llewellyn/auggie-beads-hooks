@@ -3582,6 +3582,18 @@ class Scanner:
             if shell is not None:
                 self.scope.bash = bash_kind(shell)
                 self.scope.zsh = shell == "zsh"
+            # bash that starts in POSIX mode -- `--posix`, `-o posix`, a
+            # SHELLOPTS listing `posix`, or run as `sh` -- sets POSIXLY_CORRECT
+            # to `y`, unexported, where its environment holds none, so in 5.2
+            # a later `set -a; set -o posix` leaves it unexported. Where the
+            # mode or the shell is in doubt, so is the value.
+            if process and posix is not False and \
+                    self.scope.bash is not False and \
+                    self.shell_var("POSIXLY_CORRECT") is None:
+                certain = posix is True and self.scope.bash is True
+                self.scope.assigns["POSIXLY_CORRECT"] = \
+                    "y" if certain else UNKNOWN
+                self.scope.exported["POSIXLY_CORRECT"] = False
             if pwd is not None:
                 # Every shell sets PWD as it starts, and exports it, whatever
                 # it inherited: after `env -i bash -c 'cd /ws/link; ...'` a
@@ -3805,6 +3817,11 @@ class Scanner:
             self.scope.exported[name] = UNKNOWN
         elif self.shell_var(name) is None:
             self.bind(name, "y")
+        elif self.scope.allexport is not False and \
+                self.is_exported(name) is not True:
+            # bash 3.2 sets a set one to `y` anew, which exports it under `set
+            # -a`; 5.2 leaves it as it was.
+            self.scope.exported[name] = UNKNOWN
 
     def seal_opaque(self, cwd=False):
         """Puts every name, attribute and function in this scope in doubt.

@@ -1738,6 +1738,23 @@ check_unresolved "shopt \$cs_flag lastpipe; true | cd $CD/other; bd -C store clo
 check_target "$STORE/nested/inner" "cd $STORE; shopt -so allexport; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
 check_target "$STORE/nested/inner" "cd $STORE; shopt -s -o allexport; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
 check_target "$STORE" "cd $STORE; shopt -so allexport; shopt -uo allexport; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+# A word `set` cannot read may be an operand, after which no option is read,
+# so an option after one is in doubt: with CS_OPTS=foo, `-a` is an operand.
+# One among `shopt`'s flags may be `-so allexport` itself. Past `--`, the
+# word is an operand and the option before it stands.
+check_unresolved "cd $STORE; set \$CS_OPTS -a; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+check_unresolved "cd $STORE; shopt \$CS_OPTS; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+check_target "$STORE/nested/inner" "cd $STORE; set -a -- \$CS_OPTS; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+# A lone `-` ends `set`'s options as `--` does, so `-a` after it is an
+# operand. `shopt` refuses `-s` with `-u` and changes nothing.
+check_target "$STORE" "cd $STORE; set - -a; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+check_target "$STORE/nested/inner" "cd $STORE; shopt -so allexport; shopt -s -u -o allexport; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+# A word `shopt` cannot read may end its flags, so a `-u` after one may be an
+# option name: with CS_OPTS=allexport, the first turns allexport on. Both
+# flags before such a word are still refused.
+check_unresolved "cd $STORE; CS_OPTS=\$(printf allexport); shopt -so \"\$CS_OPTS\" -u; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+check_target "$STORE/nested/inner" "cd $STORE; shopt -so allexport; shopt -s -u -o \"\$CS_OPTS\"; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+check_target "$CD/other/store" "shopt -s lastpipe; shopt -su lastpipe; true | cd $CD/other; bd -C store close CHR-1"
 # The write itself is still found inside one, under the cwd in force there.
 check sync "true | bd close CHR-1"
 check_target "$CD/other/store" "cd $CD/other; true | bd -C store close CHR-1"
@@ -1893,9 +1910,9 @@ check_target "$STORE" ". ./select-store.sh; command cd -L $STORE; env -i bd clos
 check_target "$STORE" "(. ./select-store.sh); cd -L $STORE; env -i bd close CHR-1"
 check_target "$STORE" ". ./select-store.sh; BEADS_DIR=$STORE/.beads command bd close CHR-1"
 check_target '/tmp/store' ". ./select-store.sh; eval 'command bd -C /tmp/store close CHR-1'"
-# A function of its name this text defined does not displace the builtin:
-# in POSIX mode bash finds `export`, `unset` and the other special builtins
-# first, and that mode may be set at any point.
+# In POSIX mode, which may be set at any point, bash finds `export`, `unset`
+# and the other special builtins before a function of the same name this
+# text defined.
 check_target "$STORE" "function export { :; }; builtin set -o posix; export BEADS_DIR=$STORE/.beads; command bd close CHR-1"
 check_target "$STORE" "export BEADS_DIR=/tmp/store/.beads; function unset { :; }; builtin set -o posix; unset BEADS_DIR; cd $STORE; command bd close CHR-1"
 check_target '/tmp/store' '/bin/bash -c "bd -C /tmp/store close CHR-1"'
@@ -2287,6 +2304,98 @@ check_target "$STORE" "bd() { env bd -C $STORE close CHR-1; }; bd"
 # running the program, even where the name ends in a builtin's.
 check_target "$STORE" "./cd() { bd -C . close CHR-1; }; cd $STORE; ./cd"
 check_unresolved "./cd() { builtin cd /tmp; }; ./cd $STORE; env -i bd close CHR-1"
+# A function is found before a builtin of the same name, so one named after a
+# builtin the scan reads is called rather than read. `builtin cd` and `command
+# cd` pass it by.
+check_target "$STORE" "cd $STORE; cd() { bd -C . close CHR-1; }; cd /tmp"
+check_unresolved "cd() { builtin cd $STORE/nested/inner; }; cd $STORE; bd close CHR-1"
+check_target "$STORE" "cd() { builtin cd $STORE/nested/inner; }; builtin cd $STORE; bd close CHR-1"
+check_target "$STORE" "cd() { builtin cd $STORE/nested/inner; }; command cd $STORE; bd close CHR-1"
+check_unresolved "printf() { builtin cd $STORE/nested/inner; }; cd $STORE; printf x; bd close CHR-1"
+check_unresolved "bash() { builtin cd $STORE/nested/inner; }; cd $STORE; bash -c true; bd close CHR-1"
+check_target "$STORE" "source() { :; }; cd $STORE; source ./select-store.sh; bd close CHR-1"
+# A special builtin comes first in POSIX mode instead, and where that mode is
+# unknown both are read. `set -o posix`, `shopt -so posix` and assigning
+# POSIXLY_CORRECT turn it on, and unsetting POSIXLY_CORRECT turns it off.
+check_unresolved "unset() { builtin cd $STORE/nested/inner; }; cd $STORE; unset X; bd close CHR-1"
+check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; unset() { :; }; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set -o posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; t && set -o posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; shopt -so posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; POSIXLY_CORRECT=1; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; unset() { :; }; POSIXLY_CORRECT=1; builtin unset POSIXLY_CORRECT; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+# So does every other special builtin, though the scan reads nothing from
+# it: `:`, `trap`, a quoted `export` and a `return` inside a function.
+check_target "$STORE" ":() { builtin cd $STORE/nested/inner; }; set -o posix; cd $STORE; :; bd close CHR-1"
+check_unresolved ":() { builtin cd $STORE/nested/inner; }; cd $STORE; :; bd close CHR-1"
+check_target "$STORE" "trap() { builtin cd $STORE/nested/inner; }; set -o posix; cd $STORE; trap '' HUP; bd close CHR-1"
+check_target "$STORE" "function export { builtin cd $STORE/nested/inner; }; set -o posix; cd $STORE; \\export CS_X=1; bd close CHR-1"
+check_target "$STORE" "return() { builtin cd $STORE/nested/inner; }; set -o posix; cs_f() { return; }; cd $STORE; cs_f; bd close CHR-1"
+# A temporary POSIXLY_CORRECT puts bash 5.2 in that mode for the command, for
+# a function's body, and after a special builtin, where bash 3.2 stays as it
+# was, so the mode is in doubt.
+check_unresolved "export BEADS_DIR=/tmp/store/.beads; unset() { :; }; cd $STORE; POSIXLY_CORRECT=1 unset BEADS_DIR; bd close CHR-1"
+check_target_unresolved '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; unset() { :; }; cs_f() { unset BEADS_DIR; bd close CHR-1; }; cd $STORE; POSIXLY_CORRECT=1 cs_f"
+check_unresolved "export BEADS_DIR=/tmp/store/.beads; unset() { :; }; POSIXLY_CORRECT=1 eval true; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+# A shell starts in that mode as bash's options and environment say, and as
+# `sh`; zsh finds the function first.
+check_target '/tmp/store' "cd $STORE; BEADS_DIR=/tmp/store/.beads bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; cd $STORE; BEADS_DIR=/tmp/store/.beads bash --posix -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; cd $STORE; POSIXLY_CORRECT= BEADS_DIR=/tmp/store/.beads bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; cd $STORE; BEADS_DIR=/tmp/store/.beads sh -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" '/tmp/store' "cd $STORE; BEADS_DIR=/tmp/store/.beads zsh -f -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+# bash keeps POSIXLY_CORRECT in step with `set -o posix` and `shopt -so posix`,
+# setting it unexported, or exported under `set -a`, and unsetting it, so a
+# child bash starts in POSIX mode as they leave it.
+check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; export POSIXLY_CORRECT=1; set +o posix; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; export POSIXLY_CORRECT=1; shopt -uo posix; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; set -o posix; export POSIXLY_CORRECT; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; set -a; set -o posix; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+# Each option takes effect as it is read, so `-a` after `-o posix` does not
+# export the variable, and `+o posix -o posix` sets it anew, unexported.
+check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; set -o posix -a; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; export POSIXLY_CORRECT=1; set +o posix -o posix; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; shopt -so posix allexport; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+# A bash that starts in POSIX mode sets the variable, unexported, so `set -a;
+# set -o posix` finds it set: bash 3.2 sets it anew and exports it, 5.2 leaves
+# it unexported, so whether a child is in POSIX mode, and reads BASH_ENV, is
+# in doubt. The same holds for a variable a first `set -o posix` set. Exported
+# outright, it puts the child in POSIX mode.
+check_unresolved "cd $STORE; bash --posix -c 'set -a; set -o posix; BASH_ENV=/tmp/select-store.sh bash -c \"bd close CHR-1\"'"
+check_unresolved "cd $STORE; exec -a sh bash -c 'set -a; set -o posix; BASH_ENV=/tmp/select-store.sh bash -c \"bd close CHR-1\"'"
+check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; cd $STORE; bash --posix -c 'set -a; set -o posix; bash -c \"unset() { :; }; unset BEADS_DIR; bd close CHR-1\"'"
+check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; set -o posix; set -a; set -o posix; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; cd $STORE; bash --posix -c 'export POSIXLY_CORRECT; bash -c \"unset() { :; }; unset BEADS_DIR; bd close CHR-1\"'"
+# Turning the option off unsets POSIXLY_CORRECT, so where it may have been
+# turned off -- on one path, or by a word the scan cannot read -- a value a
+# function assigns after it may outlive a call that set the variable for that
+# call only: with `t` true, bash 3.2 and 5.2 both run `bd -C /tmp/store`.
+check_unresolved 'POSIXLY_CORRECT=/tmp/a; cs_f() { t && set +o posix; POSIXLY_CORRECT=/tmp/store; }; POSIXLY_CORRECT=/tmp/a cs_f; bd -C "$POSIXLY_CORRECT" close CHR-1'
+check_unresolved 'POSIXLY_CORRECT=/tmp/a; cs_f() { t && shopt -uo posix; POSIXLY_CORRECT=/tmp/store; }; POSIXLY_CORRECT=/tmp/a cs_f; bd -C "$POSIXLY_CORRECT" close CHR-1'
+check_unresolved 'POSIXLY_CORRECT=/tmp/a; cs_f() { set +o $CS_OPTS; POSIXLY_CORRECT=/tmp/store; }; POSIXLY_CORRECT=/tmp/a cs_f; bd -C "$POSIXLY_CORRECT" close CHR-1'
+check_unresolved 'POSIXLY_CORRECT=/tmp/a; cs_f() { shopt -uo $CS_OPTS; POSIXLY_CORRECT=/tmp/store; }; POSIXLY_CORRECT=/tmp/a cs_f; bd -C "$POSIXLY_CORRECT" close CHR-1'
+# POSIX mode is in doubt after a word `set` or `shopt` cannot read: with
+# CS_OPTS=foo, `+o posix` and `-o posix` are operands, and with CS_OPTS='-so
+# posix', `shopt $CS_OPTS` turns the mode on. A literal operand ends the
+# options, so `+o posix` after `foo` leaves the mode on.
+check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set -o posix; set \$CS_OPTS +o posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set \$CS_OPTS -o posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; shopt \$CS_OPTS; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set -o posix; set foo +o posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+# So does a lone `-`, and `shopt` refuses `-s` with `-u`, so neither turns
+# the mode off.
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set -o posix; set - +o posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set -o posix; shopt -suo posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+# A wrapper running bash as `sh` starts it in POSIX mode too, and then it
+# reads no BASH_ENV.
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; cd $STORE; exec -a sh bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "cd $STORE; BASH_ENV=/tmp/select-store.sh exec -a sh bash -c 'bd close CHR-1'"
+# A builtin read in place of a call reads the function table from before it,
+# whatever the body did to the table.
+check_unresolved "cd $STORE; cs_g() { builtin cd $STORE/nested/inner; }; eval() { unset -f cs_g; }; t && unset -f eval; eval cs_g; bd close CHR-1"
+# Where the function may be gone as well as passed by, the builtin is also
+# read with it defined: an `eval` may leave POSIX mode and call it.
+check_target "$STORE $STORE/nested/inner" "cd $STORE; CS_D=$STORE; eval() { bd -C \"\$CS_D\" close CHR-1; }; t && unset -f eval; t && set -o posix; eval 'CS_D=$STORE/nested/inner; set +o posix; eval :'"
 
 # --- comments -------------------------------------------------------------
 # A `#` that opens a word begins a comment, and what follows is not script.

@@ -757,31 +757,33 @@ class ShellOpts:
 
     bash keeps the variable in step with every option in force, its defaults
     among them -- `braceexpand:hashall:interactive-comments` before any is
-    set -- and this scan follows only `physical` and `monitor`, and `posix`
-    as far as it can. So the string is unknowable, as is a word expanding
-    it, while whether it lists each of those is known: True, False or
-    UNKNOWN, which is all a bash started from it reads.
+    set -- and this scan follows only `physical`, `monitor` and `allexport`,
+    and `posix` as far as it can. So the string is unknowable, as is a word
+    expanding it, while whether it lists each of those is known: True, False
+    or UNKNOWN, which is all a bash started from it reads.
     """
 
-    __slots__ = ("physical", "monitor", "posix")
+    __slots__ = ("physical", "monitor", "posix", "allexport")
 
-    def __init__(self, physical, monitor, posix):
+    def __init__(self, physical, monitor, posix, allexport):
         self.physical = physical
         self.monitor = monitor
         self.posix = posix
+        self.allexport = allexport
 
     def __eq__(self, other):
         return isinstance(other, ShellOpts) and \
             other.physical is self.physical and \
-            other.monitor is self.monitor and other.posix is self.posix
+            other.monitor is self.monitor and other.posix is self.posix and \
+            other.allexport is self.allexport
 
     def __hash__(self):
         return hash(ShellOpts)
 
 
 def opts_option(value, option):
-    """Whether the SHELLOPTS `value` lists `option`, `physical`, `monitor` or
-    `posix`: True, False or UNKNOWN.
+    """Whether the SHELLOPTS `value` lists `option`, `physical`, `monitor`,
+    `posix` or `allexport`: True, False or UNKNOWN.
 
     None or UNSET is a SHELLOPTS that is not there, which lists nothing.
     """
@@ -1917,7 +1919,8 @@ class Scanner:
                 assigns["SHELLOPTS"] = ShellOpts(
                     self.carried_option("physical"),
                     self.carried_option("monitor"),
-                    self.carried_option("posix"))
+                    self.carried_option("posix"),
+                    self.carried_option("allexport"))
                 exported["SHELLOPTS"] = True
             elif state is UNKNOWN:
                 assigns["SHELLOPTS"] = UNKNOWN
@@ -3733,7 +3736,8 @@ class Scanner:
     def sub_scan(self, stmts, cwd=None, known=None, seed=None, text=None,
                  sealed=False, conditional=False, frame="subshell",
                  process=False, physical=False, monitor=False, shell=None,
-                 pwd=None, startup=False, functions=None, posix=False):
+                 pwd=None, startup=False, functions=None, posix=False,
+                 allexport=False):
         """Scans `stmts` as a subshell: its writes count, its state does not.
 
         `text` is the source those statements were parsed from, needed when they
@@ -3752,9 +3756,9 @@ class Scanner:
         of this shell, variables and all; a new process gets the environment,
         which is the exported names alone -- see `environment_view`. `seed` is
         what the command line handed the process on top of that, and is
-        exported there, having arrived as environment. `physical` and
-        `monitor` are the process's own `set -P` and `set -m` states, and
-        `posix` its `Scope.posix`; see `shell_wrapper`. `shell` names the
+        exported there, having arrived as environment. `physical`, `monitor`
+        and `allexport` are the process's own `set -P`, `set -m` and `set -a`
+        states, and `posix` its `Scope.posix`; see `shell_wrapper`. `shell` names the
         program the process is -- a shell, or `env` for what `env -S` runs --
         which settles `Scope.bash` and `Scope.zsh`, and `pwd`, for a shell,
         the directory it starts in as its PWD names it and whether that
@@ -3788,7 +3792,7 @@ class Scanner:
                 self.scope.exported = exported
                 self.scope.readonly = {}
                 self.scope.readonly_opaque = False
-                self.scope.allexport = False
+                self.scope.allexport = allexport
                 self.scope.lastpipe = False
                 self.scope.monitor = monitor
                 self.scope.physical = physical
@@ -6277,7 +6281,7 @@ class Scanner:
         shell = args[start].value.rsplit("/", 1)[-1]
         privileged = self.shell_option(words, "p", "privileged")
         inherited = {}
-        for option in ("physical", "monitor", "posix"):
+        for option in ("physical", "monitor", "posix", "allexport"):
             state = self.shellopts_option(cmd, args, start, option)
             if privileged is True:
                 state = False
@@ -6328,6 +6332,20 @@ class Scanner:
             posix = UNKNOWN
         else:
             posix = True
+        # allexport comes on from the shell's own `-a` or `-o allexport`, zsh's
+        # spellings among them, or from SHELLOPTS, which only turns options
+        # on: `env SHELLOPTS=allexport bash +a -c 'BEADS_DIR=/ext/.beads; bd
+        # close X'` writes /ext, as `bash -a -c ...` does.
+        if shell == "zsh":
+            exports = self.zsh_option(words, ("allexport",), False, "a")
+        else:
+            exports = self.shell_option(words, "a", "allexport")
+        if inherited["allexport"] is True or exports is True:
+            allexport = True
+        elif inherited["allexport"] is False and exports is False:
+            allexport = False
+        else:
+            allexport = UNKNOWN
         startup = self.startup_runs(cmd, args, start, words, privileged,
                                     interactive, inherited["posix"])
         leader = self.leader
@@ -6339,7 +6357,7 @@ class Scanner:
                              startup=startup,
                              functions=self.imported_functions(
                                  shell, sealed, privileged, seed),
-                             posix=posix)
+                             posix=posix, allexport=allexport)
         finally:
             self.leader = leader
 
@@ -6597,7 +6615,7 @@ class Scanner:
 
     def carried_option(self, option):
         """Whether this shell's own SHELLOPTS hands a child `option`, physical
-        mode, job control or POSIX mode: True, False or UNKNOWN.
+        mode, job control, POSIX mode or allexport: True, False or UNKNOWN.
 
         Only an exported one reaches a child. bash keeps its SHELLOPTS in step
         with its options, so that carries the option as it stands now: `export
@@ -6805,7 +6823,8 @@ class Scanner:
     def scan_script(self, script, seed=None, sealed=False, cwd=None,
                     known=None, conditional=False, frame="subshell",
                     process=False, physical=False, monitor=False, shell=None,
-                    pwd=None, startup=False, functions=None, posix=False):
+                    pwd=None, startup=False, functions=None, posix=False,
+                    allexport=False):
         """Scans `script` as shell text, in a scope of its own.
 
         The text is parsed afresh, so its offsets index it and not the command
@@ -6832,7 +6851,8 @@ class Scanner:
                           conditional=conditional, frame=frame,
                           process=process, physical=physical,
                           monitor=monitor, shell=shell, pwd=pwd,
-                          startup=startup, functions=functions, posix=posix)
+                          startup=startup, functions=functions, posix=posix,
+                          allexport=allexport)
         finally:
             self.scripts.discard(script)
 

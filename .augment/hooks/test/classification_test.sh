@@ -1752,6 +1752,19 @@ check_unresolved "shopt \$cs_flag lastpipe; true | cd $CD/other; bd -C store clo
 check_target "$STORE/nested/inner" "cd $STORE; shopt -so allexport; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
 check_target "$STORE/nested/inner" "cd $STORE; shopt -s -o allexport; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
 check_target "$STORE" "cd $STORE; shopt -so allexport; shopt -uo allexport; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+# A child shell starts with allexport on from its own `-a` or `-o allexport`,
+# zsh's spellings among them, or from a SHELLOPTS listing it, which only turns
+# options on and which a privileged bash ignores. A parent's exported
+# SHELLOPTS carries its own `set -a`.
+check_target "$STORE/nested/inner" "unset BEADS_DB; cd $STORE; bash -a -c 'BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1'"
+check_target "$STORE/nested/inner" "unset BEADS_DB; cd $STORE; bash -o allexport -c 'BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1'"
+check_target "$STORE/nested/inner" "unset BEADS_DB; cd $STORE; dash -a -c 'BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1'"
+check_target_unless "$ZSH_GLOBAL_ZSHENV" "$STORE/nested/inner" "unset BEADS_DB; cd $STORE; zsh -f -o ALL_EXPORT -c 'BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1'"
+check_target "$STORE/nested/inner" "unset BEADS_DB; cd $STORE; env SHELLOPTS=allexport bash +a -c 'BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1'"
+check_target "$STORE/nested/inner" "unset BEADS_DB; cd $STORE; export SHELLOPTS; set -a; bash -c 'BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; cd $STORE; env SHELLOPTS=allexport bash -p -c 'BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; cd $STORE; bash -a +a -c 'BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1'"
+check_unresolved "unset BEADS_DB; cd $STORE; bash \$CS_OPTS -c 'BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1'"
 # A word `set` cannot read may be an operand, after which no option is read,
 # so an option after one is in doubt: with CS_OPTS=foo, `-a` is an operand.
 # One among `shopt`'s flags may be `-so allexport` itself. Past `--`, the

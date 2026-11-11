@@ -2938,6 +2938,7 @@ class Scanner:
         target = None
         store = None
         helped = False
+        versioned = False
         flags = set()
         i = start + 1
         end_of_opts = False
@@ -2999,6 +3000,13 @@ class Scanner:
                 helped = True
                 i += 1
                 continue
+            # A version flag is read the same way, but counts only where no
+            # verb follows; see the end of this function.
+            if not end_of_opts and not after_unknown_opt \
+                    and not may_have_ended and word == "--version":
+                versioned = True
+                i += 1
+                continue
             if not end_of_opts and word.startswith("--"):
                 name, sep, inline = word.partition("=")
                 flags.add(name)
@@ -3050,6 +3058,9 @@ class Scanner:
                 if "h" in letters and not after_unknown_opt \
                         and not may_have_ended:
                     helped = True
+                if "V" in letters and not after_unknown_opt \
+                        and not may_have_ended:
+                    versioned = True
                 if opt is None:
                     i += 1
                     continue
@@ -3072,6 +3083,12 @@ class Scanner:
                 continue
             operands.append(word)
             i += 1
+        # `bd --version` and `bd -V` print the version and exit, as `--help`
+        # does. No verb takes either flag, and `bd` 1.3.4 refuses `bd --version
+        # close X`, but a later release that gave a verb one would run it, so a
+        # verb after either is still read.
+        if versioned and not operands:
+            helped = True
         if opaque:
             store = Field(UNKNOWN)
         return operands, target, store, helped, flags

@@ -1642,7 +1642,8 @@ class Scanner:
                            monitor="monitor" in opts,
                            physical="physical" in opts,
                            posix="posix" in opts or
-                           "POSIXLY_CORRECT" in os.environ)
+                           "POSIXLY_CORRECT" in os.environ or
+                           "POSIX_PEDANTIC" in os.environ)
         self.depth = 0
         # The functions defined so far, by name, each with a tuple of the
         # bodies it may have and the text each was parsed from; see
@@ -5875,13 +5876,16 @@ class Scanner:
             monitor = UNKNOWN
         # A special builtin comes before a function of its name in bash's
         # POSIX mode, which bash as `sh` starts in whatever `+o posix` says,
-        # and in the shells that refuse to define such a function; zsh finds
-        # the function first. See `Scope.posix`.
+        # and in dash and ksh, which refuse to define such a function; zsh
+        # finds the function first. So does busybox ash, the `sh` of Alpine,
+        # so for `sh`, which may be either, both are read. See `Scope.posix`.
         if shell == "zsh":
             posix = False
         elif bash_kind(shell) is True:
             posix = self.bash_posix(cmd, args, start, words,
                                     inherited["posix"])
+        elif bash_kind(shell) is UNKNOWN:
+            posix = UNKNOWN
         else:
             posix = True
         startup = self.startup_runs(cmd, args, start, words, privileged,
@@ -5978,17 +5982,20 @@ class Scanner:
 
         `--posix` and `-o posix` turn it on, as the last word on it says; see
         `startup_runs`. POSIXLY_CORRECT puts bash in that mode whatever a `+o
-        posix` says, and so does `inherited`, a SHELLOPTS listing `posix` that
-        a privileged shell has not ignored, and so does a wrapper running it
-        as `sh`; see `argv0_sh`.
+        posix` says, and so does POSIX_PEDANTIC, which bash reads only from its
+        environment as it starts, and so does `inherited`, a SHELLOPTS listing
+        `posix` that a privileged shell has not ignored, and so does a wrapper
+        running it as `sh`; see `argv0_sh`.
         """
         option = self.shell_option(words, "", "posix")
-        variable = self.command_env(cmd, args, start, "POSIXLY_CORRECT")
-        if variable is not None and variable is not UNKNOWN:
-            variable = True
-        elif variable is None:
-            variable = False
-        states = {option, variable, inherited, self.argv0_sh(args, start)}
+        states = {option, inherited, self.argv0_sh(args, start)}
+        for name in ("POSIXLY_CORRECT", "POSIX_PEDANTIC"):
+            variable = self.command_env(cmd, args, start, name)
+            if variable is not None and variable is not UNKNOWN:
+                variable = True
+            elif variable is None:
+                variable = False
+            states.add(variable)
         if True in states:
             return True
         if UNKNOWN in states:

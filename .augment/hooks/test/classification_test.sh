@@ -2351,12 +2351,20 @@ check_target "$STORE" "return() { builtin cd $STORE/nested/inner; }; set -o posi
 check_unresolved "export BEADS_DIR=/tmp/store/.beads; unset() { :; }; cd $STORE; POSIXLY_CORRECT=1 unset BEADS_DIR; bd close CHR-1"
 check_target_unresolved '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; unset() { :; }; cs_f() { unset BEADS_DIR; bd close CHR-1; }; cd $STORE; POSIXLY_CORRECT=1 cs_f"
 check_unresolved "export BEADS_DIR=/tmp/store/.beads; unset() { :; }; POSIXLY_CORRECT=1 eval true; cd $STORE; unset BEADS_DIR; bd close CHR-1"
-# A shell starts in that mode as bash's options and environment say, and as
-# `sh`; zsh finds the function first.
+# A shell starts in that mode as bash's options and environment say, and
+# dash refuses the definition; zsh finds the function first. So does busybox
+# ash, the `sh` of Alpine, so in `sh` both are read.
 check_target '/tmp/store' "cd $STORE; BEADS_DIR=/tmp/store/.beads bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
 check_target "$STORE" "unset BEADS_DB; cd $STORE; BEADS_DIR=/tmp/store/.beads bash --posix -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
 check_target "$STORE" "unset BEADS_DB; cd $STORE; POSIXLY_CORRECT= BEADS_DIR=/tmp/store/.beads bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
-check_target "$STORE" "unset BEADS_DB; cd $STORE; BEADS_DIR=/tmp/store/.beads sh -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_unresolved "unset BEADS_DB; cd $STORE; BEADS_DIR=/tmp/store/.beads sh -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; cd $STORE; BEADS_DIR=/tmp/store/.beads dash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+# POSIX_PEDANTIC in its environment starts bash in that mode too, and then it
+# reads no BASH_ENV; assigned in a running shell, it changes nothing.
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; cd $STORE; POSIX_PEDANTIC=1 bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; export POSIX_PEDANTIC=1; cd $STORE; bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; cd $STORE; POSIX_PEDANTIC=1 BASH_ENV=/tmp/select-store.sh bash -c 'bd close CHR-1'"
+check_target '/tmp/store' "export BEADS_DIR=/tmp/store/.beads; unset() { :; }; POSIX_PEDANTIC=1; cd $STORE; unset BEADS_DIR; bd close CHR-1"
 check_target_unless "$ZSH_GLOBAL_ZSHENV" '/tmp/store' "cd $STORE; BEADS_DIR=/tmp/store/.beads zsh -f -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
 # bash keeps POSIXLY_CORRECT in step with `set -o posix` and `shopt -so posix`,
 # setting it unexported, or exported under `set -a`, and unsetting it, so a

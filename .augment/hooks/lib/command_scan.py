@@ -5521,8 +5521,14 @@ class Scanner:
         leaves the POSIXLY_CORRECT it sets unexported, where `set -a -o posix`
         exports it, and `set +o posix -o posix` sets it anew, unexported.
         """
+        # A word this scan cannot read may be an operand or `--`, after which
+        # bash reads no option, or may split into options of its own: with
+        # X=foo, `set $X +o posix` leaves POSIX mode on. So no option read
+        # after one is certain.
+        doubt = False
+
         def change(key, setting):
-            value = UNKNOWN if conditional else setting
+            value = UNKNOWN if conditional or doubt else setting
             if key == "a":
                 self.scope.allexport = value
             elif key == "m":
@@ -5533,6 +5539,8 @@ class Scanner:
                 self.posix_option(value)
 
         def unread():
+            nonlocal doubt
+            doubt = True
             for key in ("a", "m", "P", "posix"):
                 change(key, UNKNOWN)
 
@@ -5583,12 +5591,14 @@ class Scanner:
         """
         setting = None
         set_o = False
+        flag_unread = False
         names = []
         i = start + 1
         while i < len(args):
             word = args[i].value
             if word is UNKNOWN:
                 names.append(UNKNOWN)
+                flag_unread = True
                 i += 1
                 continue
             if word == "--":
@@ -5610,15 +5620,19 @@ class Scanner:
         if UNKNOWN in names:
             # A word that cannot be read may have been the option, or the
             # flag that set it, so whatever it could have named is unknown.
-            if set_o or "allexport" in names:
+            # One among the flags may hold the names as well: with X='-so
+            # posix', `shopt $X` is `shopt -so posix`. So every option read
+            # here is unknown after it.
+            every = set_o or flag_unread
+            if every or "allexport" in names:
                 self.scope.allexport = UNKNOWN
-            if set_o or "physical" in names:
+            if every or "physical" in names:
                 self.scope.physical = UNKNOWN
-            if set_o or "monitor" in names:
+            if every or "monitor" in names:
                 self.scope.monitor = UNKNOWN
-            if set_o or "posix" in names:
+            if every or "posix" in names:
                 self.posix_option(UNKNOWN)
-            if not set_o:
+            if flag_unread or not set_o:
                 self.scope.lastpipe = UNKNOWN
             return
         if setting is None:

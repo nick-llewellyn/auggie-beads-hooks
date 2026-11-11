@@ -1738,6 +1738,13 @@ check_unresolved "shopt \$cs_flag lastpipe; true | cd $CD/other; bd -C store clo
 check_target "$STORE/nested/inner" "cd $STORE; shopt -so allexport; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
 check_target "$STORE/nested/inner" "cd $STORE; shopt -s -o allexport; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
 check_target "$STORE" "cd $STORE; shopt -so allexport; shopt -uo allexport; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+# A word `set` cannot read may be an operand, after which no option is read,
+# so an option after one is in doubt: with CS_OPTS=foo, `-a` is an operand.
+# One among `shopt`'s flags may be `-so allexport` itself. Past `--`, the
+# word is an operand and the option before it stands.
+check_unresolved "cd $STORE; set \$CS_OPTS -a; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+check_unresolved "cd $STORE; shopt \$CS_OPTS; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+check_target "$STORE/nested/inner" "cd $STORE; set -a -- \$CS_OPTS; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
 # The write itself is still found inside one, under the cwd in force there.
 check sync "true | bd close CHR-1"
 check_target "$CD/other/store" "cd $CD/other; true | bd -C store close CHR-1"
@@ -2347,6 +2354,14 @@ check_unresolved 'POSIXLY_CORRECT=/tmp/a; cs_f() { t && set +o posix; POSIXLY_CO
 check_unresolved 'POSIXLY_CORRECT=/tmp/a; cs_f() { t && shopt -uo posix; POSIXLY_CORRECT=/tmp/store; }; POSIXLY_CORRECT=/tmp/a cs_f; bd -C "$POSIXLY_CORRECT" close CHR-1'
 check_unresolved 'POSIXLY_CORRECT=/tmp/a; cs_f() { set +o $CS_OPTS; POSIXLY_CORRECT=/tmp/store; }; POSIXLY_CORRECT=/tmp/a cs_f; bd -C "$POSIXLY_CORRECT" close CHR-1'
 check_unresolved 'POSIXLY_CORRECT=/tmp/a; cs_f() { shopt -uo $CS_OPTS; POSIXLY_CORRECT=/tmp/store; }; POSIXLY_CORRECT=/tmp/a cs_f; bd -C "$POSIXLY_CORRECT" close CHR-1'
+# POSIX mode is in doubt after a word `set` or `shopt` cannot read: with
+# CS_OPTS=foo, `+o posix` and `-o posix` are operands, and with CS_OPTS='-so
+# posix', `shopt $CS_OPTS` turns the mode on. A literal operand ends the
+# options, so `+o posix` after `foo` leaves the mode on.
+check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set -o posix; set \$CS_OPTS +o posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set \$CS_OPTS -o posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; shopt \$CS_OPTS; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set -o posix; set foo +o posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
 # A wrapper running bash as `sh` starts it in POSIX mode too, and then it
 # reads no BASH_ENV.
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; cd $STORE; exec -a sh bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"

@@ -343,6 +343,20 @@ check sync 'bd update CHR-1 -m --help'
 # as one.
 check skip 'bd -C /tmp/x --actor me --help'
 
+# --- version flags -----------------------------------------------------
+# `bd --version` and `bd -V` print the version and exit, as `bd version` does.
+check skip 'bd --version'
+check skip 'bd -V'
+check skip 'bd -qV'
+check skip 'bd -C /tmp/x --version'
+check sync 'bd --version && bd close X-1'
+# No verb takes either flag, and `bd` 1.3.4 refuses both beside one, so this
+# writes nothing today. A verb that gained such a flag would run, so the verb
+# is still read.
+check sync 'bd --version close X-1'
+check sync 'bd -V close X-1'
+check sync 'bd close X-1 --version'
+
 # --- read-only token as an argument value ------------------------------
 check sync 'bd update CHR-1 --notes "run bd show CHR-2 next"'
 check sync 'bd close CHR-1 -m "see bd list output"'

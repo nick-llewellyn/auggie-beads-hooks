@@ -859,13 +859,13 @@ check_unresolved 'IFS=:; false && unset IFS; OUT=/tmp/a:b; bd -C $OUT close CHR-
 # name it assigns: which of its paths ran is not inferred.
 check_unresolved 'IFS=:; f() { local IFS=" "; unset IFS; }; f; OUT=/tmp/a:b; bd -C $OUT close CHR-1'
 # A startup or sourced file may set IFS, so after one it is unknowable until
-# the text sets or unsets it -- by `builtin unset`, a plain `unset` being one
-# a function the file defined may stand in for. A new shell starts with the
-# default, whatever it inherits.
+# the text sets it. An `unset` does not settle it, as the file may have made
+# IFS readonly, and a plain `unset` may be a function the file defined. A new
+# shell starts with the default, whatever it inherits.
 check_unresolved "BASH_ENV=/tmp/select-store.sh bash -c 'OUT=/tmp/a:b; bd -C \$OUT close CHR-1'"
 check_unresolved 'source ./cs-ifs.sh; OUT=/tmp/a:b; bd -C $OUT close CHR-1'
 check_target '/tmp/a' "BASH_ENV=/tmp/select-store.sh bash -c 'IFS=:; OUT=/tmp/a:b; bd -C \$OUT close CHR-1'"
-check_target '/tmp/a:b' "BASH_ENV=/tmp/select-store.sh bash -c 'builtin unset IFS; OUT=/tmp/a:b; bd -C \$OUT close CHR-1'"
+check_unresolved "BASH_ENV=/tmp/select-store.sh bash -c 'builtin unset IFS; OUT=/tmp/a:b; bd -C \$OUT close CHR-1'"
 check_unresolved "BASH_ENV=/tmp/select-store.sh bash -c 'unset IFS; OUT=/tmp/a:b; command bd -C \$OUT close CHR-1'"
 check_target '/tmp/a:b' "IFS=: bash -c 'OUT=/tmp/a:b; bd -C \$OUT close CHR-1'"
 check_target '/tmp/a:b' "export IFS=:; bash -c 'OUT=/tmp/a:b; bd -C \$OUT close CHR-1'"
@@ -3135,6 +3135,18 @@ check_unresolved "true && set -P; export SHELLOPTS; bash -c 'cd $WS_DIR/link/.. 
 check_target "$EXT" "export SHELLOPTS; set -P; unset SHELLOPTS; bash -c 'cd $WS_DIR/link/.. && bd close CHR-1'"
 check_target "$WS_DIR" "export -n SHELLOPTS; SHELLOPTS=physical bash -c 'set -P; bash -c \"cd $WS_DIR/link/.. && bd close CHR-1\"'"
 check_target "$WS_DIR" "export -n SHELLOPTS; SHELLOPTS=physical env -S 'bash -c \"set -P; bash -c \\\"cd $WS_DIR/link/.. && bd close CHR-1\\\"\"'"
+# Every shell refuses to unset a name the text made readonly, which keeps its
+# value, and a readonly POSIXLY_CORRECT keeps bash in POSIX mode. A name that
+# may be readonly is unknown after the `unset`, as is one a function made
+# readonly with `local -r`. A subshell's readonly dies with it, and a new
+# process inherits none.
+check_target '/tmp/ext' "readonly BEADS_DIR=/tmp/ext/.beads; export BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
+check_target '/tmp/ext' "declare -r BEADS_DIR=/tmp/ext/.beads; export BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
+check_unresolved "t && readonly BEADS_DIR=/tmp/ext/.beads; export BEADS_DIR=/tmp/ext/.beads; unset BEADS_DIR; cd $STORE; bd close CHR-1"
+check_unresolved "cs_f() { local -r BEADS_DIR=/tmp/ext/.beads; }; cs_f; export BEADS_DIR=/tmp/ext/.beads; unset BEADS_DIR; cd $STORE; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; (readonly BEADS_DIR=/tmp/ext/.beads); export BEADS_DIR=/tmp/ext/.beads; unset BEADS_DIR; cd $STORE; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; readonly BEADS_DIR=/tmp/ext/.beads; export BEADS_DIR; cd $STORE; bash -c 'unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; unset() { :; }; export BEADS_DIR=/tmp/ext/.beads; POSIXLY_CORRECT=1; readonly POSIXLY_CORRECT; builtin unset POSIXLY_CORRECT; cd $STORE; unset BEADS_DIR; bd close CHR-1"
 # As a word it lists every option in force, bash's defaults among them, and
 # this scan follows only one, so a path built from it is unknown, and so is
 # the mode of a child handed it.

@@ -1525,7 +1525,7 @@ class Scope:
     def __init__(self, cwd, known, assigns, sealed=False, exported=None,
                  allexport=False, lastpipe=False, monitor=False,
                  physical=False, spelled=True, bash=True, zsh=False,
-                 posix=False):
+                 posix=False, readonly=None):
         self.cwd = cwd
         self.known = known
         # Whether `cwd` is also how the shell's PWD spells the directory:
@@ -1557,6 +1557,10 @@ class Scope:
         # runs `bd` with no BEADS_DIR at all unless something exported it, and
         # reading every assignment as exported named a store `bd` never saw.
         self.exported = {} if exported is None else exported
+        # The names made readonly, True or UNKNOWN where a `readonly` may or
+        # may not have run. An `unset` of one fails and leaves it as it was;
+        # see `is_readonly`.
+        self.readonly = {} if readonly is None else readonly
         # `set -a` in force: every later assignment is exported. UNKNOWN when
         # a `set -a` may or may not have run.
         self.allexport = allexport
@@ -1592,7 +1596,7 @@ class Scope:
         return Scope(self.cwd, self.known, dict(self.assigns), self.sealed,
                      dict(self.exported), self.allexport, self.lastpipe,
                      self.monitor, self.physical, self.spelled, self.bash,
-                     self.zsh, self.posix)
+                     self.zsh, self.posix, dict(self.readonly))
 
     def last_member_stays(self):
         """Whether a pipeline's last member runs in this shell: True, False
@@ -1698,6 +1702,19 @@ class Scanner:
             raise Unavailable("more work than %d steps" % MAX_STEPS)
 
     # --- assignment state -------------------------------------------------
+
+    def is_readonly(self, name):
+        """Whether `name` is readonly here: True, False or UNKNOWN.
+
+        Only the text makes a name readonly: a new process inherits none, and
+        a subshell keeps its parent's. After a seal, any name may have been
+        made readonly by what the scan could not read.
+        """
+        if name in self.scope.readonly:
+            return self.scope.readonly[name]
+        if self.scope.sealed is OPAQUE:
+            return UNKNOWN
+        return False
 
     def is_exported(self, name):
         """Whether `name` reaches a child process: True, False or UNKNOWN.
@@ -3508,6 +3525,10 @@ class Scanner:
             if base.exported.get(name, missing) != \
                     inner.exported.get(name, missing):
                 saved.exported[name] = UNKNOWN
+        for name in set(inner.readonly) | set(base.readonly):
+            if base.readonly.get(name, missing) != \
+                    inner.readonly.get(name, missing):
+                saved.readonly[name] = UNKNOWN
         if base.allexport != inner.allexport:
             saved.allexport = UNKNOWN
         if base.lastpipe != inner.lastpipe:
@@ -3585,6 +3606,7 @@ class Scanner:
                 assigns, exported = self.environment_view(sealed)
                 self.scope.assigns = assigns
                 self.scope.exported = exported
+                self.scope.readonly = {}
                 self.scope.allexport = False
                 self.scope.lastpipe = False
                 self.scope.monitor = monitor
@@ -4503,6 +4525,9 @@ class Scanner:
         variant = (cmd.get("Variant") or {}).get("Value")
         state = None
         functions = False
+        # `readonly`, and `declare`, `typeset` or `local` with `-r`, make the
+        # names readonly too; see `is_readonly`.
+        readonly = variant == "readonly"
         if variant == "export":
             state = True
         elif variant == "local":
@@ -4515,9 +4540,11 @@ class Scanner:
                     "f" in flag[1:]:
                 functions = True
             if flag is UNKNOWN:
-                # A flag this scan cannot read may be `-x`, `-n` or `-f`, so
-                # what the builtin did to the attribute is unknown.
+                # A flag this scan cannot read may be `-x`, `-n`, `-r` or
+                # `-f`, so what the builtin did to the attributes is unknown.
                 state = UNKNOWN
+                if readonly is not True and variant != "export":
+                    readonly = UNKNOWN
             elif flag == "--":
                 break
             elif variant == "export" and flag.startswith("-") and \
@@ -4529,8 +4556,13 @@ class Scanner:
             elif variant != "export" and flag.startswith("+") and \
                     "x" in flag[1:]:
                 state = False
+            if flag is not UNKNOWN and flag.startswith("-") and \
+                    "r" in flag[1:] and variant != "export":
+                readonly = True
         if functions:
             return
+        if conditional and readonly:
+            readonly = UNKNOWN
         if conditional and state is not None:
             state = UNKNOWN
         for arg in args:
@@ -4543,6 +4575,8 @@ class Scanner:
                 self.assign(arg, conditional)
             if state is not None:
                 self.scope.exported[name] = state
+            if readonly and self.scope.readonly.get(name) is not True:
+                self.scope.readonly[name] = readonly
 
     def assign(self, arg, conditional):
         """Records the assignment node `arg` in this scope.
@@ -5442,13 +5476,20 @@ class Scanner:
                     self.possibly_unset.discard(name)
                 continue
             # bash refuses to unset its readonly SHELLOPTS, which still
-            # carries its options to a child; see `carried_option`.
+            # carries its options to a child; see `carried_option`. Every
+            # shell refuses to unset a name the text made readonly, which
+            # keeps its value: after `readonly BEADS_DIR=/ext/.beads; export
+            # BEADS_DIR; unset BEADS_DIR`, `bd close X` writes /ext.
             refused = self.scope.bash if name == "SHELLOPTS" else False
-            if refused is True:
+            readonly = self.is_readonly(name)
+            if refused is True or readonly is True:
                 continue
+            if readonly is UNKNOWN:
+                refused = UNKNOWN
             self.unset_names.add(name)
             if name == "POSIXLY_CORRECT":
-                self.posix_mode(UNKNOWN if conditional else False)
+                self.posix_mode(UNKNOWN if conditional or refused is UNKNOWN
+                                else False)
             if conditional or refused is UNKNOWN:
                 self.scope.assigns[name] = UNKNOWN
                 self.scope.exported[name] = UNKNOWN

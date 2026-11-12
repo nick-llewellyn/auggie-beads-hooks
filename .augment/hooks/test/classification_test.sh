@@ -1765,6 +1765,16 @@ check_target "$STORE/nested/inner" "unset BEADS_DB; cd $STORE; export SHELLOPTS;
 check_target "$STORE" "unset BEADS_DB; cd $STORE; env SHELLOPTS=allexport bash -p -c 'BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1'"
 check_target "$STORE" "unset BEADS_DB; cd $STORE; bash -a +a -c 'BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1'"
 check_unresolved "unset BEADS_DB; cd $STORE; bash \$CS_OPTS -c 'BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1'"
+# The shell the command runs in imports the hook's own SHELLOPTS and hands it
+# on, so one listing `allexport` exports every assignment there and in an
+# unflagged child; a privileged child ignores it.
+set -a
+export SHELLOPTS
+check_target "$STORE/nested/inner" "unset BEADS_DB; cd $STORE; BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1"
+check_target "$STORE/nested/inner" "unset BEADS_DB; cd $STORE; bash -c 'BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; cd $STORE; bash -p -c 'BEADS_DIR=$STORE/nested/inner/.beads; bd close CHR-1'"
+set +a
+export -n SHELLOPTS
 # A word `set` cannot read may be an operand, after which no option is read,
 # so an option after one is in doubt: with CS_OPTS=foo, `-a` is an operand.
 # One among `shopt`'s flags may be `-so allexport` itself. Past `--`, the

@@ -1764,14 +1764,15 @@ class Scanner:
         # start instead, which leaves such a target unresolved.
         #
         # The shell the command runs in imports an inherited SHELLOPTS, so one
-        # listing `physical` starts it in physical mode, one listing
-        # `monitor` with job control, and one listing `posix`, or a
-        # POSIXLY_CORRECT, in POSIX mode; see `shellopts_option`. It sets and
-        # exports PWD as it starts, whatever this process's environment
-        # holds; see `sub_scan`.
+        # listing `allexport` starts it exporting every assignment, one
+        # listing `physical` in physical mode, one listing `monitor` with job
+        # control, and one listing `posix`, or a POSIXLY_CORRECT, in POSIX
+        # mode; see `shellopts_option`. It sets and exports PWD as it starts,
+        # whatever this process's environment holds; see `sub_scan`.
         opts = os.environ.get("SHELLOPTS", "").split(":")
         self.scope = Scope(launch_cwd, bool(launch_cwd), {},
                            exported={"PWD": True},
+                           allexport="allexport" in opts,
                            monitor="monitor" in opts,
                            physical="physical" in opts,
                            posix="posix" in opts or

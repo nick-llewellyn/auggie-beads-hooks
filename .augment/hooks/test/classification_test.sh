@@ -2631,9 +2631,10 @@ check_target '/tmp/store' 'until bd -C /tmp/store close CHR-1'
 check_target '/tmp/store' 'then bd -C /tmp/store close CHR-1'
 check_target '/tmp/store' 'bd -C "/tmp/store'
 # shfmt rejects a function named after a declaration keyword, or `let`, which
-# bash defines and runs outside POSIX mode. Spelled `function NAME`, it
+# bash defines and runs outside POSIX mode. Spelled `function NAME()`, it
 # parses, and the rest of the command is read: before, everything after the
-# definition was cut off and read as no write.
+# definition was cut off and read as no write. The body may follow the `()`
+# with no space, as a group, a subshell or a compound command.
 check_target '/tmp/store' 'export() { :; }; bd -C /tmp/store close CHR-1'
 check_target '/tmp/store' 'declare() { :; }; bd -C /tmp/store close CHR-1'
 check_target '/tmp/store' 'local() { :; }; bd -C /tmp/store close CHR-1'
@@ -2642,6 +2643,10 @@ check_target '/tmp/store' 'typeset() { :; }; bd -C /tmp/store close CHR-1'
 check_target '/tmp/store' 'nameref() { :; }; bd -C /tmp/store close CHR-1'
 check_target '/tmp/store' 'let() { :; }; bd -C /tmp/store close CHR-1'
 check_target '/tmp/store' 'export () { :; }; bd -C /tmp/store close CHR-1'
+check_target '/tmp/store' 'export(){ :; }; bd -C /tmp/store close CHR-1'
+check_target '/tmp/store' 'export()(:); bd -C /tmp/store close CHR-1'
+check_target '/tmp/store' 'let()if true; then :; fi; bd -C /tmp/store close CHR-1'
+check_target '/tmp/store' 'local()for cs_x in a; do bd -C /tmp/store close CHR-1; done; local'
 check_target '/tmp/store' 'export() { bd -C /tmp/store close CHR-1; }; export CS_X=1'
 # Text the parse still cannot read is cut off, and what is cut off may hold a
 # write, so it counts as a script that cannot be read: a write with no store

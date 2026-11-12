@@ -604,11 +604,14 @@ def byte_offset(raw, row, col):
 
 def keyword_function(text, match):
     """`text` with the definition shfmt rejected at `match` spelled `function
-    NAME`, or None when the text there is no such definition.
+    NAME()`, or None when the text there is no such definition.
 
     The error names the `(` after the name, which must be directly followed by
     `)` and preceded by the name as a word of its own: `export ( a )` is no
-    definition, and is left to `truncate`.
+    definition, and is left to `truncate`. The `()` stays, as the body may
+    follow it with no space: dropped, `export(){ :; }` became `function
+    export{ :; }`, and `export()(:)` and `local()for ...` fail as `function
+    NAME` with a space too.
     """
     raw = text.encode("utf-8")
     cut = byte_offset(raw, int(match.group("row")), int(match.group("col")))
@@ -620,8 +623,8 @@ def keyword_function(text, match):
     parens = re.match(rb"\([ \t]*\)", raw[cut:])
     if not head or not parens:
         return None
-    return (raw[:head.start()] + b"function " + name +
-            raw[cut + parens.end():]).decode("utf-8", "ignore")
+    return (raw[:head.start()] + b"function " +
+            raw[head.start():]).decode("utf-8", "ignore")
 
 
 def truncate(text, line):

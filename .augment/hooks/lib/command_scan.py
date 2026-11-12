@@ -1684,6 +1684,9 @@ class Scanner:
         # The scope each command a wrapper moved was invoked from, by the
         # command's node; see `call`.
         self.callers = {}
+        # The values a special builtin's prefix gives, read before they were
+        # made assignments of this shell, by the command's node; see `call`.
+        self.prefixes = {}
 
     def found_target(self, path):
         if path not in self.targets:
@@ -4637,9 +4640,19 @@ class Scanner:
         if any((arg.get("Name") or {}).get("Value") == "POSIXLY_CORRECT"
                for arg in assigns):
             self.posix_mode(UNKNOWN)
-        if start == 0 and assigns and first in SPECIAL_BUILTINS:
+        # `exec` is a special builtin though it wraps a command, and with
+        # none its prefix outlives it as any other's: after `set -o posix;
+        # BEADS_DIR=/ext/.beads exec`, `bd close X` writes /ext. The prefix
+        # is read once, before the shell makes it its own, and that reading
+        # stands for the command too, so `OUT=$OUT/x eval ...` adds `/x`
+        # once rather than twice; see `prefix_values`.
+        if assigns and first in SPECIAL_BUILTINS:
+            self.prefixes[id(cmd)] = self.prefix_values(cmd)
             self.special_prefix(cmd, conditional)
-        self.run_command(cmd, fields, start, split, conditional, follows)
+        try:
+            self.run_command(cmd, fields, start, split, conditional, follows)
+        finally:
+            self.prefixes.pop(id(cmd), None)
         if unread:
             self.seal_sourced()
 
@@ -5787,7 +5800,13 @@ class Scanner:
         the command without it, the others standing, so `SHELLOPTS=physical
         bash -c ...` hands the child the SHELLOPTS this shell had. In `sh`,
         which may be bash or not, the value is UNKNOWN.
+
+        A special builtin's prefix is read before the shell makes it its
+        own, and that reading is kept for the command; see `call`.
         """
+        fixed = self.prefixes.get(id(cmd))
+        if fixed is not None:
+            return dict(fixed)
         caller = self.callers.get(id(cmd))
         if caller is not None and caller is not self.scope:
             return self.in_scope(caller, self.prefix_values, cmd)

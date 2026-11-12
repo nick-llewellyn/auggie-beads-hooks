@@ -2411,6 +2411,13 @@ check_target "$STORE" "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_
 check_target "$STORE" "unset BEADS_DB; set -o posix; export BEADS_DIR=/tmp/ext/.beads; cd $STORE; BEADS_DIR=/tmp/x unset BEADS_DIR; bd close CHR-1"
 check_target '/tmp/ext' "dash -c 'OUT=/tmp/a; OUT=/tmp/ext :; bd -C \"\$OUT\" close CHR-1'"
 check_target "$STORE" "unset BEADS_DIR BEADS_DB; cd $STORE; dash -c 'BEADS_DIR=/tmp/ext/.beads :; bd close CHR-1'"
+# `exec` with no command is one too. The prefix is read once, before the
+# shell makes it its own, so a value built from the name is not built again
+# for the command.
+check_target '/tmp/ext' "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads exec; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; cd $STORE; BEADS_DIR=/tmp/ext/.beads exec; bd close CHR-1"
+check_target '/tmp/store' "set -o posix; OUT=/tmp; OUT=\$OUT/store eval 'bd -C \"\$OUT\" close CHR-1'"
+check_target '/tmp/store' "set -o posix; OUT=/tmp; OUT=\$OUT/store exec bash -c 'bd -C \"\$OUT\" close CHR-1'"
 # A function call's are kept in POSIX mode by bash 3.2 and ksh and restored by
 # bash 5.2 and dash, so they are in doubt after the call unless the mode is
 # known to be off.

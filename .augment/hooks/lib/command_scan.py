@@ -1139,6 +1139,48 @@ def may_assign(field, name):
     return field.value.startswith((name + "=", name + "+="))
 
 
+def unexports(operands, name):
+    """Whether `export` run with `operands` takes the export of `name` away:
+    True, False, or UNKNOWN where a word this scan cannot read may be an
+    option or the name.
+
+    `-n` does, given the name, unless `-f` turns it on functions; options
+    end at `--` or the first operand, after which an `-n` is an operand.
+    """
+    flag = functions = named = False
+    options = True
+    for field in operands:
+        word = field.value
+        if word is UNKNOWN:
+            if field.assign is None:
+                named = named or UNKNOWN
+            elif field.assign in (name, name + "+"):
+                named = True
+            if options is not False and field.assign is None and (
+                    field.dash or field.split):
+                flag = flag or UNKNOWN
+                functions = functions or UNKNOWN
+                options = UNKNOWN
+            else:
+                options = False
+        elif options is not False and word == "--":
+            options = False
+        elif options is not False and word.startswith("-") and word != "-":
+            if "n" in word[1:]:
+                flag = True if options is True else flag or UNKNOWN
+            if "f" in word[1:]:
+                functions = True if options is True else functions or UNKNOWN
+        else:
+            options = False
+            if word == name or word.startswith((name + "=", name + "+=")):
+                named = True
+    if False in (flag, named) or functions is True:
+        return False
+    if flag is True and named is True and functions is False:
+        return True
+    return UNKNOWN
+
+
 def join_states(one, other):
     """The value and export state a name has after one of two paths, each
     as `settle_prefix` holds it: what they share, and UNKNOWN elsewhere."""
@@ -1733,6 +1775,11 @@ class Scanner:
         """
         if name in self.scope.exported:
             return self.scope.exported[name]
+        return self.inherited_export(name)
+
+    def inherited_export(self, name):
+        """Whether `name` reaches a child process where the text said
+        nothing of it; see `is_exported`."""
         if self.scope.sealed is OPAQUE:
             return UNKNOWN
         if self.scope.sealed is CLEARED:
@@ -4683,7 +4730,7 @@ class Scanner:
         if held:
             operands = fields[start + 1:] if first in (
                 "export", "readonly") else ()
-            self.settle_prefix(held, operands)
+            self.settle_prefix(held, operands, first)
         if unread:
             self.seal_sourced()
 
@@ -4716,9 +4763,10 @@ class Scanner:
             elif bash is True or self.scope.allexport:
                 self.scope.exported[name] = True
 
-    def settle_prefix(self, held, operands):
+    def settle_prefix(self, held, operands, builtin):
         """Settles the prefix `special_prefix` made assignments of this shell,
-        once the builtin has run, from the state `held` its names had before.
+        once the builtin `builtin` has run, from the state `held` its names
+        had before.
 
         bash makes the prefix a temporary variable over the shell's own, and
         keeps it only where POSIX mode still holds when the builtin returns:
@@ -4728,7 +4776,10 @@ class Scanner:
         make the prefix in the shell itself, where the builtin then acts on
         it. An operand of `export` or `readonly` run as a command, which this
         scan does not read, may assign a name over its prefix, so such a name
-        is unknown: `OUT=/p export OUT=/r` leaves OUT /r.
+        is unknown: `OUT=/p export OUT=/r` leaves OUT /r. `export -n` takes
+        away the export bash gives the prefix, leaving the one the name had
+        before or allexport gives it: after `set -o posix; unset BEADS_DIR;
+        BEADS_DIR=/ext/.beads export -n BEADS_DIR`, `bd close X` walks up.
         """
         bash, posix = self.scope.bash, self.scope.posix
         for name, before in held.items():
@@ -4747,6 +4798,31 @@ class Scanner:
             if posix is not False and any(
                     may_assign(field, name) for field in operands):
                 self.scope.assigns[name] = UNKNOWN
+            if builtin == "export" and posix is not False:
+                self.unexport_prefix(name, before[1],
+                                     unexports(operands, name),
+                                     bash is True and posix is True)
+
+    def unexport_prefix(self, name, was, applies, certain):
+        """Applies an `export -n` that `applies` to the prefixed `name`,
+        which was exported as `was` before the prefix. `certain` says the
+        shell is bash in POSIX mode, where that export is all that remains.
+        """
+        if applies is False:
+            return
+        if was is MISSING:
+            was = self.inherited_export(name)
+        allexport = self.scope.allexport
+        if was is True or allexport is True:
+            kept = True
+        elif was is UNKNOWN or allexport is UNKNOWN:
+            kept = UNKNOWN
+        else:
+            kept = False
+        now = self.is_exported(name)
+        if applies is not True or not certain or now is UNKNOWN:
+            kept = kept if kept is now else UNKNOWN
+        self.scope.exported[name] = kept
 
     def restore_state(self, name, state):
         """Puts back the value and export state `state` of `name`, where

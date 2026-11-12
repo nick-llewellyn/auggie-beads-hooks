@@ -2426,6 +2426,16 @@ check_unresolved 'unset OUT; set -o posix; OUT=/tmp/prefix readonly OUT=/tmp/rea
 check_unresolved 'unset OUT; set -o posix; OUT=/tmp/prefix export OUT+=/real; bd -C "$OUT" close CHR-1'
 check_unresolved 'unset OUT; set -o posix; OUT=/tmp/prefix readonly OUT+=/real; bd -C "$OUT" close CHR-1'
 check_unresolved 'unset OUT; set -o posix; OUT=/tmp/prefix export OUT+="$(cat f)"; bd -C "$OUT" close CHR-1'
+# `export -n` takes away the export bash gives the prefix, though not one the
+# name had before or allexport gives it; `-f` turns it on functions instead,
+# and after `--` an `-n` is an operand.
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads export -n BEADS_DIR; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads export -n -- BEADS_DIR; bd close CHR-1"
+check_target '/tmp/ext' "unset BEADS_DB; set -o posix; export BEADS_DIR=/tmp/a/.beads; cd $STORE; BEADS_DIR=/tmp/ext/.beads export -n BEADS_DIR; bd close CHR-1"
+check_target '/tmp/ext' "unset BEADS_DIR BEADS_DB; set -a; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads export -n BEADS_DIR; bd close CHR-1"
+check_target '/tmp/ext' "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads export -fn BEADS_DIR; bd close CHR-1"
+check_target '/tmp/ext' "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads export -- -n BEADS_DIR; bd close CHR-1"
+check_unresolved "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads export \"\$CS_OPTS\" BEADS_DIR; bd close CHR-1"
 check_unresolved "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; false && BEADS_DIR=/tmp/decoy/.beads :; BEADS_DIR=/tmp/ext/.beads; bd close CHR-1"
 check_target '/tmp/ext' "dash -c 'OUT=/tmp/a; OUT=/tmp/ext :; bd -C \"\$OUT\" close CHR-1'"
 check_target "$STORE" "unset BEADS_DIR BEADS_DB; cd $STORE; dash -c 'BEADS_DIR=/tmp/ext/.beads :; bd close CHR-1'"

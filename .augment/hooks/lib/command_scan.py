@@ -1994,16 +1994,16 @@ class Scanner:
                                  assign=assignment_name(word, self.raw),
                                  split=may_split(word, self.raw),
                                  dash=may_be_option(word)))
-            elif len(fields) == 1:
+            elif fields:
                 out.append(self.assignment_tilde(word, fields[0]))
-            else:
-                out.extend(fields)
+                out.extend(fields[1:])
         return out
 
     def assignment_tilde(self, word, field):
-        """`field`, the one argument `word` gives, with the `~` after its `=`
-        expanded where it is shaped like an assignment and the shell expands
-        it there.
+        """`field`, the first argument `word` gives, with the `~` after its
+        `=` expanded where it is shaped like an assignment and the shell
+        expands it there. The shell expands it before splitting the word, so
+        `env BEADS_DIR=~/x$TAIL` expands it where TAIL splits too.
 
         bash expands an unquoted `~` after the `=` of such an argument to any
         command, outside POSIX mode: `env BEADS_DIR=~/ext/.beads bd close X`

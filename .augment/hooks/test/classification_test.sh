@@ -2698,6 +2698,9 @@ check_target "$BASE/~/store" 'HOME=/tmp/home; env "BEADS_DIR=~/store/.beads" bd 
 # after the prefix does not, nor does a line continuation within it.
 check_target "$BASE/~/store" 'HOME=/tmp/home; env BEADS_DIR=~\/store/.beads bd close CHR-1'
 check_target '/tmp/home/store' 'HOME=/tmp/home; env BEADS_DIR=~/store\/.beads bd close CHR-1'
+# The `~` is expanded before the word is split, so a suffix that splits into
+# several arguments leaves the first one expanded.
+check_target '/tmp/home/store' "HOME=/tmp/home; CS_TAIL='/.beads CS_OTHER=1'; env BEADS_DIR=~/store\$CS_TAIL bd close CHR-1"
 check_target '/tmp/home/store' 'HOME=/tmp/home; env BEADS_DIR=~\
 /store/.beads bd close CHR-1'
 check_target "$BASE/~/store" "HOME=/tmp/home; dash -c 'env BEADS_DIR=~/store/.beads bd close CHR-1'"

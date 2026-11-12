@@ -3165,6 +3165,13 @@ check_unresolved "unset BEADS_DIR BEADS_DB; cs_f() { local -p BEADS_DIR=/tmp/ext
 check_unresolved "unset BEADS_DB; BEADS_DIR=/tmp/ext/.beads; OPT=\$(printf %s -p); declare -r \"\$OPT\" BEADS_DIR >/dev/null; export BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
 check_unresolved "unset BEADS_DB; BEADS_DIR=/tmp/ext/.beads; declare \"\$CS_OPTS\" -r BEADS_DIR >/dev/null; export BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
 check_unresolved "unset BEADS_DB; BEADS_DIR=/tmp/ext/.beads; readonly \"\$CS_OPTS\" BEADS_DIR; export BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
+# A `+r` takes the command's own `-r` away, before it or after, and an unread
+# flag's with it, but not a mark set earlier; `readonly +r` still marks.
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; declare -r +r BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; typeset +r -r BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; declare \"\$CS_OPTS\" +r BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
+check_target '/tmp/ext' "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; readonly BEADS_DIR; declare -r +r BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
+check_target '/tmp/ext' "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; readonly +r BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
 # A function named after an assignment builtin runs in its place, except
 # that bash in POSIX mode finds a special builtin first.
 check_target "$STORE" "unset BEADS_DB; function readonly { :; }; export BEADS_DIR=/tmp/ext/.beads; readonly BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"

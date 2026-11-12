@@ -4580,7 +4580,7 @@ class Scanner:
         # `readonly`, and `declare`, `typeset` or `local` with `-r`, make the
         # names readonly too; see `is_readonly`.
         readonly = variant == "readonly"
-        unread = False
+        unread = cancelled = False
         if variant == "export":
             state = True
         elif variant == "local":
@@ -4616,7 +4616,15 @@ class Scanner:
             if flag is not UNKNOWN and flag.startswith("-") and \
                     "r" in flag[1:] and variant != "export":
                 readonly = True
-        if unread and variant != "export":
+            if flag is not UNKNOWN and flag.startswith("+") and \
+                    "r" in flag[1:] and variant not in ("export", "readonly"):
+                cancelled = True
+        # `+r` takes the command's own `-r` away, wherever it stands, and an
+        # unread flag's with it: `declare -r +r BEADS_DIR` leaves it
+        # writable. A mark set earlier stays, below; `readonly +r` marks.
+        if cancelled:
+            readonly = False
+        elif unread and variant != "export":
             readonly = UNKNOWN
         if functions:
             return

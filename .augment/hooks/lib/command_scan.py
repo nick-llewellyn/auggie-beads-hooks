@@ -673,6 +673,10 @@ UNKNOWN = object()
 # answer for those either.
 UNSET = object()
 
+# A name a scope's table has no entry for, as distinct from any value one
+# may hold; see `settle_prefix`.
+MISSING = object()
+
 # How a wrapper sealed the child's environment against the names it did not
 # carry. CLEARED is `env -i` and `exec -c`: a name not carried is certainly
 # unset in the child. OPAQUE is a wrapper whose effect cannot be read -- `sudo`,
@@ -1122,6 +1126,21 @@ def assignment_name(word, raw=None):
     if not match or match.group(0).startswith("-"):
         return None
     return match.group(0)[:-1]
+
+
+def may_assign(field, name):
+    """Whether `field`, an operand of `export` or `readonly`, may assign
+    `name`: one reading `name=...`, or one this scan cannot read that is not
+    certainly an assignment of another name."""
+    if field.value is UNKNOWN:
+        return field.assign in (None, name)
+    return field.value.startswith(name + "=")
+
+
+def join_states(one, other):
+    """The value and export state a name has after one of two paths, each
+    as `settle_prefix` holds it: what they share, and UNKNOWN elsewhere."""
+    return tuple(a if a is b else UNKNOWN for a, b in zip(one, other))
 
 
 def split_fields(segments, separators, keep_nulls=False):
@@ -4646,13 +4665,23 @@ class Scanner:
         # is read once, before the shell makes it its own, and that reading
         # stands for the command too, so `OUT=$OUT/x eval ...` adds `/x`
         # once rather than twice; see `prefix_values`.
+        held = None
         if assigns and first in SPECIAL_BUILTINS:
-            self.prefixes[id(cmd)] = self.prefix_values(cmd)
+            prefix = self.prefix_values(cmd)
+            self.prefixes[id(cmd)] = prefix
+            if self.scope.posix is not False:
+                held = {name: (self.scope.assigns.get(name, MISSING),
+                               self.scope.exported.get(name, MISSING))
+                        for name in prefix}
             self.special_prefix(cmd, conditional)
         try:
             self.run_command(cmd, fields, start, split, conditional, follows)
         finally:
             self.prefixes.pop(id(cmd), None)
+        if held:
+            operands = fields[start + 1:] if first in (
+                "export", "readonly") else ()
+            self.settle_prefix(held, operands)
         if unread:
             self.seal_sourced()
 
@@ -4663,10 +4692,11 @@ class Scanner:
         In POSIX mode they do, as POSIX requires: after `set -o posix;
         BEADS_DIR=/ext/.beads :`, `bd close X` writes /ext. bash 3.2 and 5.2
         export them as well; dash and ksh keep them as shell variables. They
-        are made before the builtin runs, so `X=1 unset X` leaves X unset.
-        Outside POSIX mode, or through `command` or `builtin`, which the
-        caller rules out, they reach the builtin alone. Where the mode is in
-        doubt, so is every name assigned.
+        are made before the builtin runs, and `settle_prefix` reads what the
+        builtin did to them. Outside POSIX mode, or through `command` or
+        `builtin`, which the caller rules out, they reach the builtin alone.
+        Where the mode is in doubt, so is every name assigned, and where the
+        builtin may not run, so is its export.
         """
         posix = self.scope.posix
         if posix is False:
@@ -4678,11 +4708,53 @@ class Scanner:
             self.scope.assigns[name] = value
             if name == "POSIXLY_CORRECT":
                 self.posix_mode(UNKNOWN if value is UNKNOWN else True)
-            if posix is UNKNOWN or bash is UNKNOWN or \
+            if posix is UNKNOWN or bash is UNKNOWN or conditional or \
                     self.scope.allexport is UNKNOWN:
                 self.scope.exported[name] = UNKNOWN
             elif bash is True or self.scope.allexport:
                 self.scope.exported[name] = True
+
+    def settle_prefix(self, held, operands):
+        """Settles the prefix `special_prefix` made assignments of this shell,
+        once the builtin has run, from the state `held` its names had before.
+
+        bash makes the prefix a temporary variable over the shell's own, and
+        keeps it only where POSIX mode still holds when the builtin returns:
+        after `set -o posix; BEADS_DIR=/ext/.beads set +o posix`, BEADS_DIR is
+        as it was. An `unset` of the name removes the temporary variable
+        alone, so after `export X=/a; X=/b unset X`, X is /a. dash and ksh
+        make the prefix in the shell itself, where the builtin then acts on
+        it. An operand of `export` or `readonly` run as a command, which this
+        scan does not read, may assign a name over its prefix, so such a name
+        is unknown: `OUT=/p export OUT=/r` leaves OUT /r.
+        """
+        bash, posix = self.scope.bash, self.scope.posix
+        for name, before in held.items():
+            now = (self.scope.assigns.get(name, MISSING),
+                   self.scope.exported.get(name, MISSING))
+            if now[0] is UNSET or posix is False:
+                settled = before
+            elif posix is UNKNOWN:
+                settled = join_states(now, before)
+            else:
+                settled = now
+            if bash is UNKNOWN:
+                settled = join_states(settled, now)
+            if bash is not False:
+                self.restore_state(name, settled)
+            if posix is not False and any(
+                    may_assign(field, name) for field in operands):
+                self.scope.assigns[name] = UNKNOWN
+
+    def restore_state(self, name, state):
+        """Puts back the value and export state `state` of `name`, where
+        MISSING says the scope had none of its own."""
+        for table, value in zip((self.scope.assigns, self.scope.exported),
+                                state):
+            if value is MISSING:
+                table.pop(name, None)
+            else:
+                table[name] = value
 
     def run_command(self, cmd, fields, start, split, conditional, follows,
                     passed=False):

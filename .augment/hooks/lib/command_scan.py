@@ -1130,11 +1130,13 @@ def assignment_name(word, raw=None):
 
 def may_assign(field, name):
     """Whether `field`, an operand of `export` or `readonly`, may assign
-    `name`: one reading `name=...`, or one this scan cannot read that is not
-    certainly an assignment of another name."""
+    `name`: one reading `name=...` or `name+=...`, or one this scan cannot
+    read that is not certainly an assignment of another name. An append is
+    unknown here like any other: after `set -o posix; OUT=/p export
+    OUT+=/r`, bash 3.2 and 5.2 leave OUT /r."""
     if field.value is UNKNOWN:
-        return field.assign in (None, name)
-    return field.value.startswith(name + "=")
+        return field.assign in (None, name, name + "+")
+    return field.value.startswith((name + "=", name + "+="))
 
 
 def join_states(one, other):

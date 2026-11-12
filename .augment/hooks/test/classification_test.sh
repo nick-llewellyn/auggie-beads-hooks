@@ -2412,9 +2412,9 @@ check_target "$STORE" "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_
 # an `unset` of the name removes the temporary variable alone, leaving the
 # shell's own; dash unsets the name. Where the mode may have changed, as
 # this scan reads an `eval` that runs `set +o posix`, the name is unknown.
-# An `export` or `readonly` operand may assign the name over its prefix, and
-# the store is then unresolved, as it is where the builtin may not have run
-# and the name later exported.
+# An `export` or `readonly` operand may assign the name over its prefix, as
+# `OUT+=` does too, and the store is then unresolved, as it is where the
+# builtin may not have run and the name later exported.
 check_target '/tmp/ext' "unset BEADS_DB; set -o posix; export BEADS_DIR=/tmp/ext/.beads; cd $STORE; BEADS_DIR=/tmp/x unset BEADS_DIR; bd close CHR-1"
 check_target "$STORE" "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/x unset BEADS_DIR; bd close CHR-1"
 check_target "$STORE" "unset BEADS_DIR BEADS_DB; cd $STORE; dash -c 'export BEADS_DIR=/tmp/ext/.beads; BEADS_DIR=/tmp/x unset BEADS_DIR; bd close CHR-1'"
@@ -2423,6 +2423,9 @@ check_target "$STORE" "unset BEADS_DIR BEADS_DB; cd $STORE; BEADS_DIR=/tmp/ext/.
 check_unresolved "set -o posix; OUT=/tmp/a; OUT=/tmp/b eval 'set +o posix'; bd -C \"\$OUT\" close CHR-1"
 check_unresolved 'unset OUT; set -o posix; OUT=/tmp/prefix export OUT=/tmp/real; bd -C "$OUT" close CHR-1'
 check_unresolved 'unset OUT; set -o posix; OUT=/tmp/prefix readonly OUT=/tmp/real; bd -C "$OUT" close CHR-1'
+check_unresolved 'unset OUT; set -o posix; OUT=/tmp/prefix export OUT+=/real; bd -C "$OUT" close CHR-1'
+check_unresolved 'unset OUT; set -o posix; OUT=/tmp/prefix readonly OUT+=/real; bd -C "$OUT" close CHR-1'
+check_unresolved 'unset OUT; set -o posix; OUT=/tmp/prefix export OUT+="$(cat f)"; bd -C "$OUT" close CHR-1'
 check_unresolved "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; false && BEADS_DIR=/tmp/decoy/.beads :; BEADS_DIR=/tmp/ext/.beads; bd close CHR-1"
 check_target '/tmp/ext' "dash -c 'OUT=/tmp/a; OUT=/tmp/ext :; bd -C \"\$OUT\" close CHR-1'"
 check_target "$STORE" "unset BEADS_DIR BEADS_DB; cd $STORE; dash -c 'BEADS_DIR=/tmp/ext/.beads :; bd close CHR-1'"

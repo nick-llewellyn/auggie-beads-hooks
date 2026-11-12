@@ -358,7 +358,9 @@ and require `Auggie hook tests gate`:
   real file and `.beads/PRIME.md` a symlink to it; `bd prime` follows the
   link, but Auggie skips rule files that are symlinks. That rule carries the
   `PRIME.md` text only; `bd prime` adds the stored memories. On 1.2.0 or
-  later, remove such a rule, or the context reaches the agent twice.
+  later, remove such a rule, or the context reaches the agent twice. Where
+  `.beads/PRIME.md` is a symlink to the rule, first replace the link with
+  a copy of the rule's text, or `bd prime` loses the custom context.
 - A store the scanner cannot name is reported in a warning rather than
   synced: `bd -C "$X"` where `$X` is known only at run time; an argument
   known only at run time before `--`, as in `bd close "$ID"`, which may be

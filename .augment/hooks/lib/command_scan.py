@@ -3892,6 +3892,10 @@ class Scanner:
         self.scope.assigns = {"IFS": UNKNOWN}
         self.scope.exported = {}
         self.scope.sealed = OPAQUE
+        # A mark of its own does not outlast the file either: one may make
+        # POSIXLY_CORRECT readonly where `set +o posix` had unset it, or run
+        # `set +o posix` over a readonly one, which unsets it, mark and all.
+        self.scope.readonly = {}
         self.scope.readonly_opaque = True
         self.functions = {}
         self.functions_sealed = True

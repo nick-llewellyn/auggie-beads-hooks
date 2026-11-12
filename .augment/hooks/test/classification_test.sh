@@ -3169,6 +3169,11 @@ check_target_unresolved '/tmp/store' 'unset CS_OUT; function declare { bd -C "$C
 # new process inherits no readonly name.
 check_target "$EXT" ". ./select-store.sh; command bash -p -c 'builtin unset BEADS_DIR BEADS_DB; builtin cd $EXT; command bd close CHR-1'"
 check_unresolved ". ./select-store.sh; (builtin unset BEADS_DIR BEADS_DB; builtin cd $EXT; command bd close CHR-1)"
+# Nor does a mark the text set before the file outlast it: the file may make
+# POSIXLY_CORRECT readonly where `set +o posix` had unset it, so whether the
+# `unset` below takes it, and with it POSIX mode, is unknown, and so is
+# whether `unset OUT` is the function or the builtin.
+check_unresolved "set +o posix; . ./select-store.sh; builtin unset POSIXLY_CORRECT; unset() { builtin :; }; OUT=/tmp/keep; unset OUT; command bd -C \"\$OUT\" close CHR-1"
 # As a word it lists every option in force, bash's defaults among them, and
 # this scan follows only one, so a path built from it is unknown, and so is
 # the mode of a child handed it.

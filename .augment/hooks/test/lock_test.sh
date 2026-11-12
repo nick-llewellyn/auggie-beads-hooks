@@ -482,8 +482,15 @@ wait $! 2>/dev/null
 teardown
 
 # --- a marker set mid-push earns a second pass -------------------------
+# The marker is set once the stub logs that its push has begun, rather than
+# after a fixed second: a hook slow to reach its push under load took the
+# marker in that same pass, which pushed once, correctly, and failed the case.
 setup
-( sleep 1; : >"$WS/.beads/.augment-sync.pending" ) &
+( for _ in $(seq 100); do
+    grep -q push-begin "$BD_LOG.span" 2>/dev/null && break
+    sleep 0.1
+  done
+  : >"$WS/.beads/.augment-sync.pending" ) &
 POKE=$!
 export BD_PUSH_SLEEP=3
 fire 'bd close CHR-1'

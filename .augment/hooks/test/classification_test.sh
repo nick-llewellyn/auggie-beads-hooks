@@ -3159,6 +3159,12 @@ check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; typeset
 check_target "$STORE" "unset BEADS_DIR BEADS_DB; BEADS_DIR=/tmp/ext/.beads; declare -xp BEADS_DIR >/dev/null; cd $STORE; bd close CHR-1"
 check_target '/tmp/ext' "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; readonly -p BEADS_DIR >/dev/null; unset BEADS_DIR; cd $STORE; bd close CHR-1"
 check_unresolved "unset BEADS_DIR BEADS_DB; cs_f() { local -p BEADS_DIR=/tmp/ext/.beads >/dev/null; export BEADS_DIR; cd $STORE; bd close CHR-1; }; cs_f"
+# A flag this scan cannot read may be `-p`, or `-f` to `readonly`, as well as
+# `-r`, so whether the names end readonly is unknown, a known `-r` beside it
+# or not.
+check_unresolved "unset BEADS_DB; BEADS_DIR=/tmp/ext/.beads; OPT=\$(printf %s -p); declare -r \"\$OPT\" BEADS_DIR >/dev/null; export BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
+check_unresolved "unset BEADS_DB; BEADS_DIR=/tmp/ext/.beads; declare \"\$CS_OPTS\" -r BEADS_DIR >/dev/null; export BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
+check_unresolved "unset BEADS_DB; BEADS_DIR=/tmp/ext/.beads; readonly \"\$CS_OPTS\" BEADS_DIR; export BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
 # A function named after an assignment builtin runs in its place, except
 # that bash in POSIX mode finds a special builtin first.
 check_target "$STORE" "unset BEADS_DB; function readonly { :; }; export BEADS_DIR=/tmp/ext/.beads; readonly BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"

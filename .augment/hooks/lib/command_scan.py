@@ -4580,6 +4580,7 @@ class Scanner:
         # `readonly`, and `declare`, `typeset` or `local` with `-r`, make the
         # names readonly too; see `is_readonly`.
         readonly = variant == "readonly"
+        unread = False
         if variant == "export":
             state = True
         elif variant == "local":
@@ -4595,11 +4596,12 @@ class Scanner:
                     "p" in flag[1:]:
                 printing = True
             if flag is UNKNOWN:
-                # A flag this scan cannot read may be `-x`, `-n`, `-r` or
-                # `-f`, so what the builtin did to the attributes is unknown.
+                # A flag this scan cannot read may be `-x`, `-n`, `-r`, `-p`
+                # or `-f`, so what the builtin did to the attributes is
+                # unknown, a known `-r` beside it or not: after `declare -r
+                # "$OPT" BEADS_DIR`, OPT holding `-p`, an `unset` removes it.
                 state = UNKNOWN
-                if readonly is not True and variant != "export":
-                    readonly = UNKNOWN
+                unread = True
             elif flag == "--":
                 break
             elif variant == "export" and flag.startswith("-") and \
@@ -4614,6 +4616,8 @@ class Scanner:
             if flag is not UNKNOWN and flag.startswith("-") and \
                     "r" in flag[1:] and variant != "export":
                 readonly = True
+        if unread and variant != "export":
+            readonly = UNKNOWN
         if functions:
             return
         # `declare -p` and `typeset -p` print the names and change nothing,

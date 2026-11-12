@@ -4654,12 +4654,23 @@ class Scanner:
             name = (arg.get("Name") or {}).get("Value")
             if not name:
                 continue
+            # A readonly name refuses an assignment and keeps its value, and
+            # bash carries on outside POSIX mode: after `readonly
+            # BEADS_DIR=/ext/.beads; export BEADS_DIR=/other/.beads`, `bd close
+            # X` writes /ext. `export` gives the attribute all the same,
+            # where `declare -x` and `local` change nothing.
+            refused = False if arg.get("Naked") else self.is_readonly(name)
             # `export OUT` exports a name without changing its value, so only
             # the operands that are assignments assign.
-            if gives_value(arg) or replaces_value(arg):
-                self.assign(arg, conditional)
+            if refused is not True and (gives_value(arg) or
+                                        replaces_value(arg)):
+                self.assign(arg, conditional or refused is UNKNOWN)
             if state is not None:
-                self.scope.exported[name] = state
+                if refused is False or variant == "export":
+                    self.scope.exported[name] = state
+                elif refused is UNKNOWN and \
+                        state is not self.is_exported(name):
+                    self.scope.exported[name] = UNKNOWN
             if readonly and self.scope.readonly.get(name) is not True:
                 self.scope.readonly[name] = readonly
 

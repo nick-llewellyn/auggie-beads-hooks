@@ -3172,6 +3172,17 @@ check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; typeset
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; declare \"\$CS_OPTS\" +r BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
 check_target '/tmp/ext' "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; readonly BEADS_DIR; declare -r +r BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
 check_target '/tmp/ext' "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; readonly +r BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
+# A readonly name refuses an assignment and keeps its value, and bash carries
+# on outside POSIX mode. `export` still exports it, and `export -n` still takes
+# the export away, where `declare -x` and `local` change nothing. A name that
+# may be readonly is unknown after one.
+check_target '/tmp/real' "unset BEADS_DB; readonly BEADS_DIR=/tmp/real/.beads; export BEADS_DIR=/tmp/decoy/.beads; unset BEADS_DIR; cd $STORE; bd close CHR-1"
+check_target '/tmp/real' 'readonly OUT=/tmp/real; export OUT=/tmp/decoy; bd -C "$OUT" close CHR-1'
+check_target '/tmp/real' "unset BEADS_DB; readonly BEADS_DIR=/tmp/real/.beads; declare BEADS_DIR=/tmp/decoy/.beads; export BEADS_DIR; cd $STORE; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; readonly BEADS_DIR=/tmp/real/.beads; declare -x BEADS_DIR=/tmp/decoy/.beads; cd $STORE; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DB; readonly BEADS_DIR=/tmp/real/.beads; export BEADS_DIR; export -n BEADS_DIR=/tmp/decoy/.beads; cd $STORE; bd close CHR-1"
+check_unresolved "unset BEADS_DB; t && readonly BEADS_DIR=/tmp/real/.beads; export BEADS_DIR=/tmp/decoy/.beads; cd $STORE; bd close CHR-1"
+check_target '/tmp/real' "unset BEADS_DB; readonly BEADS_DIR=/tmp/real/.beads; export BEADS_DIR; cs_f() { local BEADS_DIR=/tmp/decoy/.beads; cd $STORE; bd close CHR-1; }; cs_f"
 # A function named after an assignment builtin runs in its place, except
 # that bash in POSIX mode finds a special builtin first.
 check_target "$STORE" "unset BEADS_DB; function readonly { :; }; export BEADS_DIR=/tmp/ext/.beads; readonly BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"

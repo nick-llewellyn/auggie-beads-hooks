@@ -2010,9 +2010,11 @@ class Scanner:
         writes $HOME/ext. Read as written, the value was a relative path, and
         the store named sat below the launch directory. bash in POSIX mode,
         dash, ksh and zsh leave the `~` as written, and so does a quoted one.
-        The prefix runs to the first `/` or `:`; one that runs into a quoted
-        or expanded part is left as it is, as the shell leaves it. Where the
-        shell or its mode is in doubt, the value is unknown.
+        The prefix runs to the first unquoted `/` or `:`; one holding a
+        quoted character, as `~\\/store` and `~us\\er` do, or running into a
+        quoted or expanded part, is left as it is, as the shell leaves it.
+        A line continuation is no quoting, and the parse has removed it.
+        Where the shell or its mode is in doubt, the value is unknown.
         """
         parts = list(word_parts(word, nulls=True))
         if not parts:
@@ -2024,7 +2026,7 @@ class Scanner:
         name, _, rest = literal.partition("=")
         end = min([rest.find(sep) for sep in "/:" if sep in rest] or
                   [len(rest)])
-        if end == len(rest) and len(parts) > 1:
+        if "\\" in rest[:end] or end == len(rest) and len(parts) > 1:
             return field
         bash, posix = self.scope.bash, self.scope.posix
         if bash is False or posix is True:

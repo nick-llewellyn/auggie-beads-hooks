@@ -2694,6 +2694,12 @@ check_target "$BASE/x~/store" 'OUT=x~/store; bd -C "$OUT" close CHR-1'
 check_target '/tmp/home/store' 'HOME=/tmp/home; env BEADS_DIR=~/store/.beads bd close CHR-1'
 check_target "$BASE/~/store" 'HOME=/tmp/home; set -o posix; env BEADS_DIR=~/store/.beads bd close CHR-1'
 check_target "$BASE/~/store" 'HOME=/tmp/home; env "BEADS_DIR=~/store/.beads" bd close CHR-1'
+# A backslash in the prefix quotes it too, an escaped `/` included, while one
+# after the prefix does not, nor does a line continuation within it.
+check_target "$BASE/~/store" 'HOME=/tmp/home; env BEADS_DIR=~\/store/.beads bd close CHR-1'
+check_target '/tmp/home/store' 'HOME=/tmp/home; env BEADS_DIR=~/store\/.beads bd close CHR-1'
+check_target '/tmp/home/store' 'HOME=/tmp/home; env BEADS_DIR=~\
+/store/.beads bd close CHR-1'
 check_target "$BASE/~/store" "HOME=/tmp/home; dash -c 'env BEADS_DIR=~/store/.beads bd close CHR-1'"
 check_unresolved 'HOME=/tmp/home; t && set -o posix; env BEADS_DIR=~/store/.beads bd close CHR-1'
 

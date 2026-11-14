@@ -2400,6 +2400,58 @@ check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset
 # the mode off.
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set -o posix; set - +o posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; unset() { :; }; set -o posix; shopt -suo posix; cd $STORE; unset BEADS_DIR; bd close CHR-1"
+# In POSIX mode a special builtin's prefix assignments outlive it, made
+# before it runs: bash exports them, dash keeps them unexported. `command`
+# takes that away, and outside POSIX mode they reach the builtin alone.
+check_target '/tmp/ext' "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads :; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; cd $STORE; BEADS_DIR=/tmp/ext/.beads :; bd close CHR-1"
+check_unresolved "unset BEADS_DIR BEADS_DB; t && set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads :; bd close CHR-1"
+check_target '/tmp/ext' "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads export CS_X=1; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads command :; bd close CHR-1"
+# bash keeps them only where POSIX mode holds when the builtin returns, and
+# an `unset` of the name removes the temporary variable alone, leaving the
+# shell's own; dash unsets the name. Where the mode may have changed, as
+# this scan reads an `eval` that runs `set +o posix`, the name is unknown.
+# An `export` or `readonly` operand may assign the name over its prefix, as
+# `OUT+=` does too, and the store is then unresolved, as it is where the
+# builtin may not have run and the name later exported.
+check_target '/tmp/ext' "unset BEADS_DB; set -o posix; export BEADS_DIR=/tmp/ext/.beads; cd $STORE; BEADS_DIR=/tmp/x unset BEADS_DIR; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/x unset BEADS_DIR; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; cd $STORE; dash -c 'export BEADS_DIR=/tmp/ext/.beads; BEADS_DIR=/tmp/x unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads set +o posix; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; cd $STORE; BEADS_DIR=/tmp/ext/.beads set -o posix; bd close CHR-1"
+check_unresolved "set -o posix; OUT=/tmp/a; OUT=/tmp/b eval 'set +o posix'; bd -C \"\$OUT\" close CHR-1"
+check_unresolved 'unset OUT; set -o posix; OUT=/tmp/prefix export OUT=/tmp/real; bd -C "$OUT" close CHR-1'
+check_unresolved 'unset OUT; set -o posix; OUT=/tmp/prefix readonly OUT=/tmp/real; bd -C "$OUT" close CHR-1'
+check_unresolved 'unset OUT; set -o posix; OUT=/tmp/prefix export OUT+=/real; bd -C "$OUT" close CHR-1'
+check_unresolved 'unset OUT; set -o posix; OUT=/tmp/prefix readonly OUT+=/real; bd -C "$OUT" close CHR-1'
+check_unresolved 'unset OUT; set -o posix; OUT=/tmp/prefix export OUT+="$(cat f)"; bd -C "$OUT" close CHR-1'
+# `export -n` takes away the export bash gives the prefix, though not one the
+# name had before or allexport gives it; `-f` turns it on functions instead,
+# and after `--` an `-n` is an operand.
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads export -n BEADS_DIR; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads export -n -- BEADS_DIR; bd close CHR-1"
+check_target '/tmp/ext' "unset BEADS_DB; set -o posix; export BEADS_DIR=/tmp/a/.beads; cd $STORE; BEADS_DIR=/tmp/ext/.beads export -n BEADS_DIR; bd close CHR-1"
+check_target '/tmp/ext' "unset BEADS_DIR BEADS_DB; set -a; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads export -n BEADS_DIR; bd close CHR-1"
+check_target '/tmp/ext' "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads export -fn BEADS_DIR; bd close CHR-1"
+check_target '/tmp/ext' "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads export -- -n BEADS_DIR; bd close CHR-1"
+check_unresolved "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads export \"\$CS_OPTS\" BEADS_DIR; bd close CHR-1"
+check_unresolved "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; false && BEADS_DIR=/tmp/decoy/.beads :; BEADS_DIR=/tmp/ext/.beads; bd close CHR-1"
+check_target '/tmp/ext' "dash -c 'OUT=/tmp/a; OUT=/tmp/ext :; bd -C \"\$OUT\" close CHR-1'"
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; cd $STORE; dash -c 'BEADS_DIR=/tmp/ext/.beads :; bd close CHR-1'"
+# `exec` with no command is one too. The prefix is read once, before the
+# shell makes it its own, so a value built from the name is not built again
+# for the command.
+check_target '/tmp/ext' "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; BEADS_DIR=/tmp/ext/.beads exec; bd close CHR-1"
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; cd $STORE; BEADS_DIR=/tmp/ext/.beads exec; bd close CHR-1"
+check_target '/tmp/store' "set -o posix; OUT=/tmp; OUT=\$OUT/store eval 'bd -C \"\$OUT\" close CHR-1'"
+check_target '/tmp/store' "set -o posix; OUT=/tmp; OUT=\$OUT/store exec bash -c 'bd -C \"\$OUT\" close CHR-1'"
+# A function call's are kept in POSIX mode by bash 3.2 and ksh and restored by
+# bash 5.2 and dash, so they are in doubt after the call unless the mode is
+# known to be off.
+check_unresolved "unset BEADS_DIR BEADS_DB; set -o posix; cd $STORE; cs_f() { :; }; BEADS_DIR=/tmp/ext/.beads cs_f; bd close CHR-1"
+check_unresolved 'set -o posix; OUT=/tmp/a; cs_f() { :; }; OUT=/tmp/ext cs_f; bd -C "$OUT" close CHR-1'
+check_target '/tmp/a' 'OUT=/tmp/a; cs_f() { :; }; OUT=/tmp/ext cs_f; bd -C "$OUT" close CHR-1'
 # A wrapper running bash as `sh` starts it in POSIX mode too, and then it
 # reads no BASH_ENV.
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; cd $STORE; exec -a sh bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"

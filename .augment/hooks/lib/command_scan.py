@@ -728,6 +728,10 @@ UNKNOWN = object()
 # answer for those either.
 UNSET = object()
 
+# A name a scope's table has no entry for, as distinct from any value one
+# may hold; see `settle_prefix`.
+MISSING = object()
+
 # How a wrapper sealed the child's environment against the names it did not
 # carry. CLEARED is `env -i` and `exec -c`: a name not carried is certainly
 # unset in the child. OPAQUE is a wrapper whose effect cannot be read -- `sudo`,
@@ -1177,6 +1181,65 @@ def assignment_name(word, raw=None):
     if not match or match.group(0).startswith("-"):
         return None
     return match.group(0)[:-1]
+
+
+def may_assign(field, name):
+    """Whether `field`, an operand of `export` or `readonly`, may assign
+    `name`: one reading `name=...` or `name+=...`, or one this scan cannot
+    read that is not certainly an assignment of another name. An append is
+    unknown here like any other: after `set -o posix; OUT=/p export
+    OUT+=/r`, bash 3.2 and 5.2 leave OUT /r."""
+    if field.value is UNKNOWN:
+        return field.assign in (None, name, name + "+")
+    return field.value.startswith((name + "=", name + "+="))
+
+
+def unexports(operands, name):
+    """Whether `export` run with `operands` takes the export of `name` away:
+    True, False, or UNKNOWN where a word this scan cannot read may be an
+    option or the name.
+
+    `-n` does, given the name, unless `-f` turns it on functions; options
+    end at `--` or the first operand, after which an `-n` is an operand.
+    """
+    flag = functions = named = False
+    options = True
+    for field in operands:
+        word = field.value
+        if word is UNKNOWN:
+            if field.assign is None:
+                named = named or UNKNOWN
+            elif field.assign in (name, name + "+"):
+                named = True
+            if options is not False and field.assign is None and (
+                    field.dash or field.split):
+                flag = flag or UNKNOWN
+                functions = functions or UNKNOWN
+                options = UNKNOWN
+            else:
+                options = False
+        elif options is not False and word == "--":
+            options = False
+        elif options is not False and word.startswith("-") and word != "-":
+            if "n" in word[1:]:
+                flag = True if options is True else flag or UNKNOWN
+            if "f" in word[1:]:
+                functions = True if options is True else functions or UNKNOWN
+        else:
+            options = False
+            if word == name or word.startswith((name + "=", name + "+=")):
+                named = True
+    if False in (flag, named) or functions is True:
+        return False
+    if flag is True and named is True and functions is False:
+        return True
+    return UNKNOWN
+
+
+def join_states(one, other):
+    """The value and export state a name has after one of two paths, each
+    as `settle_prefix` holds it: what they share, and UNKNOWN elsewhere."""
+    return tuple(a if a is b else UNKNOWN for a, b in zip(one, other))
 
 
 def split_fields(segments, separators, keep_nulls=False):
@@ -1749,6 +1812,9 @@ class Scanner:
         # The scope each command a wrapper moved was invoked from, by the
         # command's node; see `call`.
         self.callers = {}
+        # The values a special builtin's prefix gives, read before they were
+        # made assignments of this shell, by the command's node; see `call`.
+        self.prefixes = {}
 
     def found_target(self, path):
         if path not in self.targets:
@@ -1788,6 +1854,11 @@ class Scanner:
         """
         if name in self.scope.exported:
             return self.scope.exported[name]
+        return self.inherited_export(name)
+
+    def inherited_export(self, name):
+        """Whether `name` reaches a child process where the text said
+        nothing of it; see `is_exported`."""
         if self.scope.sealed is OPAQUE:
             return UNKNOWN
         if self.scope.sealed is CLEARED:
@@ -4378,6 +4449,7 @@ class Scanner:
                 self.scope.exported[each] = value is not UNSET
             outer_unset, self.unset_names = self.unset_names, set()
             seals = self.seals
+            posix = self.scope.posix
             outer_text, outer_raw = self.text, self.raw
             self.text, self.raw = text, raw
             try:
@@ -4386,8 +4458,12 @@ class Scanner:
                 self.text, self.raw = outer_text, outer_raw
                 unset = self.unset_names
                 self.unset_names = outer_unset | unset
+                # In POSIX mode, bash 3.2 and ksh keep a call's prefix
+                # assignments after it, where bash 5.2 and dash restore them,
+                # so they are in doubt unless the mode was off throughout.
+                kept = posix is not False or self.scope.posix is not False
                 for each, (value, exported) in before.items():
-                    if each in unset or self.seals != seals:
+                    if each in unset or self.seals != seals or kept:
                         self.scope.assigns[each] = UNKNOWN
                         self.scope.exported[each] = UNKNOWN
                         continue
@@ -4817,9 +4893,131 @@ class Scanner:
         if any((arg.get("Name") or {}).get("Value") == "POSIXLY_CORRECT"
                for arg in assigns):
             self.posix_mode(UNKNOWN)
-        self.run_command(cmd, fields, start, split, conditional, follows)
+        # `exec` is a special builtin though it wraps a command, and with
+        # none its prefix outlives it as any other's: after `set -o posix;
+        # BEADS_DIR=/ext/.beads exec`, `bd close X` writes /ext. The prefix
+        # is read once, before the shell makes it its own, and that reading
+        # stands for the command too, so `OUT=$OUT/x eval ...` adds `/x`
+        # once rather than twice; see `prefix_values`.
+        held = None
+        if assigns and first in SPECIAL_BUILTINS:
+            prefix = self.prefix_values(cmd)
+            self.prefixes[id(cmd)] = prefix
+            if self.scope.posix is not False:
+                held = {name: (self.scope.assigns.get(name, MISSING),
+                               self.scope.exported.get(name, MISSING))
+                        for name in prefix}
+            self.special_prefix(cmd, conditional)
+        try:
+            self.run_command(cmd, fields, start, split, conditional, follows)
+        finally:
+            self.prefixes.pop(id(cmd), None)
+        if held:
+            operands = fields[start + 1:] if first in (
+                "export", "readonly") else ()
+            self.settle_prefix(held, operands, first)
         if unread:
             self.seal_sourced()
+
+    def special_prefix(self, cmd, conditional):
+        """Makes the prefix assignments of the special builtin `cmd` runs
+        assignments of this shell, where they outlive it.
+
+        In POSIX mode they do, as POSIX requires: after `set -o posix;
+        BEADS_DIR=/ext/.beads :`, `bd close X` writes /ext. bash 3.2 and 5.2
+        export them as well; dash and ksh keep them as shell variables. They
+        are made before the builtin runs, and `settle_prefix` reads what the
+        builtin did to them. Outside POSIX mode, or through `command` or
+        `builtin`, which the caller rules out, they reach the builtin alone.
+        Where the mode is in doubt, so is every name assigned, and where the
+        builtin may not run, so is its export.
+        """
+        posix = self.scope.posix
+        if posix is False:
+            return
+        bash = self.scope.bash
+        for name, value in self.prefix_values(cmd).items():
+            if posix is UNKNOWN or conditional:
+                value = UNKNOWN
+            self.scope.assigns[name] = value
+            if name == "POSIXLY_CORRECT":
+                self.posix_mode(UNKNOWN if value is UNKNOWN else True)
+            if posix is UNKNOWN or bash is UNKNOWN or conditional or \
+                    self.scope.allexport is UNKNOWN:
+                self.scope.exported[name] = UNKNOWN
+            elif bash is True or self.scope.allexport:
+                self.scope.exported[name] = True
+
+    def settle_prefix(self, held, operands, builtin):
+        """Settles the prefix `special_prefix` made assignments of this shell,
+        once the builtin `builtin` has run, from the state `held` its names
+        had before.
+
+        bash makes the prefix a temporary variable over the shell's own, and
+        keeps it only where POSIX mode still holds when the builtin returns:
+        after `set -o posix; BEADS_DIR=/ext/.beads set +o posix`, BEADS_DIR is
+        as it was. An `unset` of the name removes the temporary variable
+        alone, so after `export X=/a; X=/b unset X`, X is /a. dash and ksh
+        make the prefix in the shell itself, where the builtin then acts on
+        it. An operand of `export` or `readonly` run as a command, which this
+        scan does not read, may assign a name over its prefix, so such a name
+        is unknown: `OUT=/p export OUT=/r` leaves OUT /r. `export -n` takes
+        away the export bash gives the prefix, leaving the one the name had
+        before or allexport gives it: after `set -o posix; unset BEADS_DIR;
+        BEADS_DIR=/ext/.beads export -n BEADS_DIR`, `bd close X` walks up.
+        """
+        bash, posix = self.scope.bash, self.scope.posix
+        for name, before in held.items():
+            now = (self.scope.assigns.get(name, MISSING),
+                   self.scope.exported.get(name, MISSING))
+            if now[0] is UNSET or posix is False:
+                settled = before
+            elif posix is UNKNOWN:
+                settled = join_states(now, before)
+            else:
+                settled = now
+            if bash is UNKNOWN:
+                settled = join_states(settled, now)
+            if bash is not False:
+                self.restore_state(name, settled)
+            if posix is not False and any(
+                    may_assign(field, name) for field in operands):
+                self.scope.assigns[name] = UNKNOWN
+            if builtin == "export" and posix is not False:
+                self.unexport_prefix(name, before[1],
+                                     unexports(operands, name),
+                                     bash is True and posix is True)
+
+    def unexport_prefix(self, name, was, applies, certain):
+        """Applies an `export -n` that `applies` to the prefixed `name`,
+        which was exported as `was` before the prefix. `certain` says the
+        shell is bash in POSIX mode, where that export is all that remains.
+        """
+        if applies is False:
+            return
+        if was is MISSING:
+            was = self.inherited_export(name)
+        allexport = self.scope.allexport
+        if was is True or allexport is True:
+            kept = True
+        elif was is UNKNOWN or allexport is UNKNOWN:
+            kept = UNKNOWN
+        else:
+            kept = False
+        now = self.is_exported(name)
+        if applies is not True or not certain or now is UNKNOWN:
+            kept = kept if kept is now else UNKNOWN
+        self.scope.exported[name] = kept
+
+    def restore_state(self, name, state):
+        """Puts back the value and export state `state` of `name`, where
+        MISSING says the scope had none of its own."""
+        for table, value in zip((self.scope.assigns, self.scope.exported),
+                                state):
+            if value is MISSING:
+                table.pop(name, None)
+            else:
+                table[name] = value
 
     def run_command(self, cmd, fields, start, split, conditional, follows,
                     passed=False):
@@ -5944,7 +6142,13 @@ class Scanner:
         the command without it, the others standing, so `SHELLOPTS=physical
         bash -c ...` hands the child the SHELLOPTS this shell had. In `sh`,
         which may be bash or not, the value is UNKNOWN.
+
+        A special builtin's prefix is read before the shell makes it its
+        own, and that reading is kept for the command; see `call`.
         """
+        fixed = self.prefixes.get(id(cmd))
+        if fixed is not None:
+            return dict(fixed)
         caller = self.callers.get(id(cmd))
         if caller is not None and caller is not self.scope:
             return self.in_scope(caller, self.prefix_values, cmd)

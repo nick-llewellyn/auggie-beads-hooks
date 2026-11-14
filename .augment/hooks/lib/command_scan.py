@@ -68,6 +68,13 @@ READONLY_PAIRS = {
     ("dolt", "status"), ("dolt", "log"),
 }
 
+# Verbs that check `bd`'s global `--readonly` before every write, so under the
+# flag they only read: `bd --readonly sql "update ..."` refuses the statement
+# wherever the flag stands among its options, while `bd --readonly import`
+# writes regardless. A verb missing here is judged by the tables above whatever
+# flags it carries, so the flag alone never makes a call read-only.
+READONLY_MODE_VERBS = {"sql"}
+
 # Words that may stand in front of the real command without changing which
 # command it is: `command bd -C /tmp/x close CHR-1` is a write to /tmp/x, and
 # reading `command` as the command name loses the target. The shell keywords
@@ -258,6 +265,10 @@ BD_DIR_OPTS = ("-C", "--dir", "--directory")
 # The one global that names the store itself rather than a directory to look
 # from. It has no short form, so only the two long spellings are read.
 BD_DB_OPT = "--db"
+
+# The global that makes `bd` refuse writes, under the verbs that check it; see
+# READONLY_MODE_VERBS.
+BD_READONLY_OPT = "--readonly"
 
 # The environment `bd` reads its store from, in the order it consults them
 # when no `--db` is given. `-C` sets BEADS_DIR before either is read, so a
@@ -3104,7 +3115,8 @@ class Scanner:
         return assigns, sealed
 
     def bd_operands(self, args, start):
-        """What the `bd` at `args[start]` says: operands, `-C`, `--db`, help.
+        """What the `bd` at `args[start]` says: operands, `-C`, `--db`, help,
+        and whether it runs in read-only mode.
 
         The target and the store come back as `Field`s, since both `-C dir`
         and `-C=dir` name one and only the first carries its own argument --
@@ -3132,12 +3144,23 @@ class Scanner:
         `--directory` all set one scalar option, and `bd -C /a -C /b close X`
         writes /b. Keeping the first pushed and registered /a while the store
         that was written went unrecorded.
+
+        Read-only mode follows `--readonly` as `bd` does, the last one winning:
+        `bd --readonly --readonly=false sql "update ..."` writes. A bare flag
+        turns it on and `--readonly=` turns it off whatever the value, so
+        `--readonly=true` is read as a write -- a no-op commit, where reading a
+        value the wrong way round strands one. A bare flag that may be another
+        option's value, or that may stand past an unreadable `--`, does not
+        turn it on, and an unreadable word that may hold options turns it off:
+        with OPTS=--readonly=false, `bd --readonly $OPTS sql "update ..."`
+        writes.
         """
         operands = []
         target = None
         store = None
         helped = False
         versioned = False
+        readonly_mode = False
         flags = set()
         i = start + 1
         end_of_opts = False
@@ -3209,6 +3232,11 @@ class Scanner:
             if not end_of_opts and word.startswith("--"):
                 name, sep, inline = word.partition("=")
                 flags.add(name)
+                if name == BD_READONLY_OPT:
+                    if sep:
+                        readonly_mode = False
+                    elif not after_unknown_opt and not may_have_ended:
+                        readonly_mode = True
                 if sep:
                     # `--opt=value` carries its value, so nothing follows it.
                     if name in BD_DIR_OPTS:
@@ -3290,7 +3318,8 @@ class Scanner:
             helped = True
         if opaque:
             store = Field(UNKNOWN)
-        return operands, target, store, helped, flags
+            readonly_mode = False
+        return operands, target, store, helped, flags, readonly_mode
 
     @staticmethod
     def splits_value(args, i):
@@ -3303,7 +3332,7 @@ class Scanner:
         return i < len(args) and args[i].value is UNKNOWN and args[i].split
 
     @staticmethod
-    def readonly(operands, helped, flags=frozenset()):
+    def readonly(operands, helped, flags=frozenset(), readonly_mode=False):
         """Whether a `bd` invocation with these operands only reads.
 
         The verb is compared whole, so `bd list-add` is not read as `bd list`
@@ -3321,6 +3350,10 @@ class Scanner:
         this scan cannot read behind such a verb: `bd ready "$(printf %s
         --claim)"` runs the claim, and the substitution is the only place the
         flag could be hiding.
+
+        `readonly_mode` is whether `--readonly` is in force, as `bd_operands`
+        reads it. It decides only for READONLY_MODE_VERBS: `bd --readonly sql`
+        refuses every write, while `bd --readonly import` still writes.
         """
         if helped:
             return True
@@ -3330,6 +3363,8 @@ class Scanner:
         if write_flags and (flags & write_flags
                             or any(op is UNKNOWN for op in operands[1:])):
             return False
+        if readonly_mode and operands[0] in READONLY_MODE_VERBS:
+            return True
         if operands[0] in READONLY_VERBS:
             return True
         return tuple(operands[:2]) in READONLY_PAIRS
@@ -5378,8 +5413,9 @@ class Scanner:
         if name != "bd":
             return
 
-        operands, target, store, helped, flags = self.bd_operands(fields, start)
-        if self.readonly(operands, helped, flags):
+        operands, target, store, helped, flags, readonly_mode = \
+            self.bd_operands(fields, start)
+        if self.readonly(operands, helped, flags, readonly_mode):
             return
         self.mutates = True
         # Named first after a startup or sourced file, `bd` may be a function

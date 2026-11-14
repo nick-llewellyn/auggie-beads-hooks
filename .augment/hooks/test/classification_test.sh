@@ -222,6 +222,32 @@ check skip 'bd todo list'
 check skip 'bd human list'
 check skip 'bd human stats'
 
+# --- bd --readonly -----------------------------------------------------
+# `bd sql` refuses every write under `--readonly`, wherever the flag stands
+# among its options, and the last of `--readonly` and `--readonly=` wins
+# (#36). `bd import` writes under it, so the flag decides nothing for a verb
+# not known to check it. `--readonly=` turns the mode off whatever its value.
+check skip 'bd --readonly sql "select 1"'
+check skip 'bd sql --readonly "select 1"'
+check skip 'bd sql "update issues set title = 1" --readonly'
+check skip 'bd -C /tmp/store --readonly sql "select 1"'
+check skip 'bd --readonly=false --readonly sql "select 1"'
+check sync 'bd sql "select 1"'
+check sync 'bd --readonly import x.jsonl'
+check sync 'bd --readonly close CHR-1'
+check sync 'bd --readonly sql "select 1" && bd close CHR-1'
+check sync 'bd --readonly=false sql "select 1"'
+check sync 'bd --readonly --readonly=false sql "select 1"'
+check sync 'bd --readonly=true sql "select 1"'
+check sync 'bd sql -- --readonly'
+# A word after an option of unknown arity may be its value, and a command
+# substitution may name any verb.
+check sync 'bd sql --frob --readonly "select 1"'
+check sync 'bd --readonly "$(cat verb.txt)" "select 1"'
+# An unreadable word may be `--`, or may hold `--readonly=false`.
+check_unresolved 'FLAG=--; bd -C /tmp/store sql "${FLAG[0]}" --readonly "select 1"'
+check_unresolved 'OPTS=$(cat opts.txt); bd -C /tmp/store --readonly $OPTS sql "select 1"'
+
 # --- mutating verbs ----------------------------------------------------
 # Includes verbs an allow-list would plausibly have missed, which is why
 # the hook enumerates the read-only side instead.

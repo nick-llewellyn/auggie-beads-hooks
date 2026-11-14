@@ -2468,8 +2468,10 @@ check sync 'echo é ; bd close CHR-1 ; )'
 check sync 'echo 日本語 ; bd close CHR-1 ; )'
 check sync $'echo é\necho é ; bd close CHR-1 ; )'
 check_target '/tmp/store' 'echo é ; bd -C /tmp/store close CHR-1 ))))'
-check skip 'echo é ; )'
-check skip 'echo )))'
+# What is cut off counts as a script that cannot be read, so a stray closer
+# warns even with no write before it.
+check_unresolved 'echo é ; )'
+check_unresolved 'echo )))'
 check skip ''
 check skip '   '
 # A coprocess is a subshell, and the command in one is a real invocation.
@@ -2628,6 +2630,31 @@ check_target '/tmp/store' 'while bd -C /tmp/store close CHR-1'
 check_target '/tmp/store' 'until bd -C /tmp/store close CHR-1'
 check_target '/tmp/store' 'then bd -C /tmp/store close CHR-1'
 check_target '/tmp/store' 'bd -C "/tmp/store'
+# shfmt rejects a function named after a declaration keyword, or `let`, which
+# bash defines and runs outside POSIX mode. Spelled `function NAME()`, it
+# parses, and the rest of the command is read: before, everything after the
+# definition was cut off and read as no write. The body may follow the `()`
+# with no space, as a group, a subshell or a compound command.
+check_target '/tmp/store' 'export() { :; }; bd -C /tmp/store close CHR-1'
+check_target '/tmp/store' 'declare() { :; }; bd -C /tmp/store close CHR-1'
+check_target '/tmp/store' 'local() { :; }; bd -C /tmp/store close CHR-1'
+check_target '/tmp/store' 'readonly() { :; }; bd -C /tmp/store close CHR-1'
+check_target '/tmp/store' 'typeset() { :; }; bd -C /tmp/store close CHR-1'
+check_target '/tmp/store' 'nameref() { :; }; bd -C /tmp/store close CHR-1'
+check_target '/tmp/store' 'let() { :; }; bd -C /tmp/store close CHR-1'
+check_target '/tmp/store' 'export () { :; }; bd -C /tmp/store close CHR-1'
+check_target '/tmp/store' 'export(){ :; }; bd -C /tmp/store close CHR-1'
+check_target '/tmp/store' 'export()(:); bd -C /tmp/store close CHR-1'
+check_target '/tmp/store' 'let()if true; then :; fi; bd -C /tmp/store close CHR-1'
+check_target '/tmp/store' 'local()for cs_x in a; do bd -C /tmp/store close CHR-1; done; local'
+check_target '/tmp/store' 'export() { bd -C /tmp/store close CHR-1; }; export CS_X=1'
+# Text the parse still cannot read is cut off, and what is cut off may hold a
+# write, so it counts as a script that cannot be read: a write with no store
+# named, which syncs the roots and warns. A genuine syntax error warns too.
+check_unresolved 'export ( a ); bd -C /tmp/store close CHR-1'
+check_unresolved 'echo ); bd -C /tmp/store close CHR-1'
+check_target_unresolved '/tmp/store' 'bd -C /tmp/store close CHR-1; echo )'
+check_unresolved "bash -c 'echo ); bd -C /tmp/store close CHR-1'"
 
 # --- PWD ------------------------------------------------------------------
 # The hook runs in a process of its own, whose cwd is neither the launch

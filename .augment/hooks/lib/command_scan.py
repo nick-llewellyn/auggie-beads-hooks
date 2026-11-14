@@ -557,7 +557,10 @@ def _q(pattern):
 
 
 _INCOMPLETE = (
-    (_q(r"unclosed here-document `(.+)`$"),
+    # 3.8 and 3.12 quote the delimiter in single quotes, 3.14 in backticks, so
+    # neither quote is taken into it: a delimiter carrying one closed nothing,
+    # and the fragment fell to `truncate`.
+    (re.compile(r"unclosed here-document [`\"']?(.+?)[`\"']?$"),
      lambda t, m: t + "\n" + m.group(1) + "\n"),
     (_q(r"matching `\{` with `\}`$"), lambda t, m: t + "\n}"),
     (_q(r"matching `\(` with `\)`$"), lambda t, m: t + "\n)"),
@@ -572,11 +575,56 @@ _INCOMPLETE = (
      lambda t, m: "if :\n" + t),
     (_q(r"`(do|done|fi|esac|elif|else)` can only be used"),
      lambda t, m: t.replace(m.group(1), ":", 1)),
+    # shfmt reads these names as declaration keywords, and `let` as an
+    # arithmetic one, so it rejects a function of that name, `export() { ...;
+    # }`, which bash accepts outside POSIX mode. Spelled `function export`, it
+    # parses; see `keyword_function`.
+    (_q(r"^(?P<row>\d+):(?P<col>\d+): `(?P<name>export|declare|local|"
+        r"readonly|typeset|nameref)` must be followed by names or "
+        r"assignments$"), lambda t, m: keyword_function(t, m)),
+    (_q(r"^(?P<row>\d+):(?P<col>\d+): `\(` must be followed by an "
+        r"expression$"), lambda t, m: keyword_function(t, m)),
 )
 
 
 # Where shfmt says the text stopped making sense, as `line:col:`.
 _AT = re.compile(r"^(\d+):(\d+):")
+
+
+def byte_offset(raw, row, col):
+    """The offset in the encoded text `raw` of shfmt's `row:col`, or None.
+
+    The column counts bytes, as every offset shfmt reports does.
+    """
+    lines = raw.splitlines(True)
+    if row < 1 or row > len(lines):
+        return None
+    return sum(len(one) for one in lines[:row - 1]) + col - 1
+
+
+def keyword_function(text, match):
+    """`text` with the definition shfmt rejected at `match` spelled `function
+    NAME()`, or None when the text there is no such definition.
+
+    The error names the `(` after the name, which must be directly followed by
+    `)` and preceded by the name as a word of its own: `export ( a )` is no
+    definition, and is left to `truncate`. The `()` stays, as the body may
+    follow it with no space: dropped, `export(){ :; }` became `function
+    export{ :; }`, and `export()(:)` and `local()for ...` fail as `function
+    NAME` with a space too.
+    """
+    raw = text.encode("utf-8")
+    cut = byte_offset(raw, int(match.group("row")), int(match.group("col")))
+    if cut is None or not 0 < cut < len(raw):
+        return None
+    name = (match.groupdict().get("name") or "let").encode()
+    head = re.search(rb"(?<![^\s;&|(){}])" + re.escape(name) + rb"[ \t]*$",
+                     raw[:cut])
+    parens = re.match(rb"\([ \t]*\)", raw[cut:])
+    if not head or not parens:
+        return None
+    return (raw[:head.start()] + b"function " +
+            raw[head.start():]).decode("utf-8", "ignore")
 
 
 def truncate(text, line):
@@ -592,34 +640,40 @@ def truncate(text, line):
     character before the fault put the cut past the offending token, which
     then failed the same way again -- or past the end of the text, where the
     prefix was abandoned and the write in it with it.
+
+    What it cuts off may hold a write as well, so `parse` reports the cut and
+    the caller counts it as a script that cannot be read; see
+    `unreadable_script`.
     """
     match = _AT.match(line)
     if not match:
         return None
-    row, col = int(match.group(1)), int(match.group(2))
     raw = text.encode("utf-8")
-    lines = raw.splitlines(True)
-    if row < 1 or row > len(lines):
-        return None
-    cut = sum(len(one) for one in lines[:row - 1]) + col - 1
-    if not 0 < cut < len(raw):
+    cut = byte_offset(raw, int(match.group(1)), int(match.group(2)))
+    if cut is None or not 0 < cut < len(raw):
         return None
     return raw[:cut].decode("utf-8", "ignore")
 
 
 def parse(text):
-    """The syntax tree of `text` and the text it was parsed from.
+    """The syntax tree of `text`, the text it was parsed from, and whether
+    any of `text` went unparsed.
 
-    The two are returned together because a repair changes the text, and the
-    tree's offsets index what was parsed rather than what was passed in. A
-    caller reading a node back out of the source needs the same string shfmt
-    saw. `(None, text)` when it cannot be parsed at all.
+    The first two are returned together because a repair changes the text,
+    and the tree's offsets index what was parsed rather than what was passed
+    in. A caller reading a node back out of the source needs the same string
+    shfmt saw. `(None, text, True)` when it cannot be parsed at all. The third
+    is true, too, when `truncate` cut text off, which the caller counts as a
+    script that cannot be read: shfmt rejects some text bash runs, and a write
+    in the cut-off part was reported as no write at all, with nothing synced
+    and no warning.
 
     Raises `Unavailable` when shfmt could not be run, which is a different
     answer from "this text does not parse": no command can be scanned at all,
     so reporting it as a command that writes nothing would strand every write
     of every command for as long as the install stays broken.
     """
+    dropped = False
     for _ in range(MAX_REPAIRS):
         try:
             done = subprocess.run(["shfmt", "--to-json", "-"], input=text,
@@ -632,7 +686,7 @@ def parse(text):
             raise Unavailable("shfmt exited %d" % done.returncode)
         if done.returncode == 0:
             try:
-                return json.loads(done.stdout), text
+                return json.loads(done.stdout), text, dropped
             except ValueError as err:
                 raise Unavailable("shfmt emitted no readable tree: %s" % err)
         lines = done.stderr.strip().splitlines()
@@ -647,10 +701,11 @@ def parse(text):
                 break
         if repaired is None:
             repaired = truncate(text, lines[0]) if lines else None
+            dropped = True
         if repaired is None or repaired == text:
-            return None, text
+            return None, text, True
         text = repaired
-    return None, text
+    return None, text, True
 
 
 # --- words ----------------------------------------------------------------
@@ -6510,7 +6565,9 @@ class Scanner:
         if script in self.scripts:
             return
         self.spend(PARSE_STEPS)
-        tree, parsed = parse(script)
+        tree, parsed, dropped = parse(script)
+        if dropped:
+            self.unreadable_script()
         if tree is None:
             return
         self.scripts.add(script)
@@ -6535,10 +6592,12 @@ def scan(command, launch_cwd, unwaited=False):
     store; see `walk_from`. `unwaited` says the caller returned as the command
     started, so every write in it is one; see `in_background`.
     """
-    tree, parsed = parse(command)
+    tree, parsed, dropped = parse(command)
     scanner = Scanner(launch_cwd, parsed)
     if unwaited:
         scanner.background += 1
+    if dropped:
+        scanner.unreadable_script()
     if tree is not None:
         scanner.stmts(tree.get("Stmts") or (), conditional=False)
     return (scanner.mutates, scanner.unresolved, scanner.targets,

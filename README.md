@@ -4,7 +4,7 @@ Auggie CLI hooks that keep a [Beads](https://github.com/gastownhall/beads)
 (`bd`) issue store in step with an agent session:
 
 - **Session start:** add the `bd prime` workflow context to the session
-  (Auggie CLI 0.36.0 discards it; see [Limitations](#limitations)).
+  (Auggie CLI before 1.2.0 discards it; see [Limitations](#limitations)).
 - **After each shell command:** if the command wrote to a bead store, commit
   that store and, unless it is set to stay local, push it to its Dolt remote.
 - **Session end:** sync every store once more, as a backstop.
@@ -28,8 +28,8 @@ existing one.
 
 ## Requirements
 
-- The Auggie CLI, with hooks (tested with 0.36.0). Hooks fire only under
-  the CLI; see [Limitations](#limitations).
+- The Auggie CLI, with hooks (tested with 0.36.0 and 1.2.0). Hooks fire
+  only under the CLI; see [Limitations](#limitations).
 - `bd` (tested with 1.3.1).
 - `bash` 3.2 or later. macOS `/bin/bash` (3.2) is supported and tested.
 - `jq`. Without it, the sync hook warns and does nothing.
@@ -45,8 +45,8 @@ directory, and prints the result. It changes directory rather than passing
 `-C`, because `bd -C <dir> prime` reads `.beads/PRIME.md` from the current
 directory's store when that has one (bd 1.3.2). It looks `bd` up before
 changing directory, so one found through a relative `PATH` entry still runs.
-Auggie's hooks documentation says SessionStart output is added to the
-session context, but Auggie CLI 0.36.0 discards it; see
+Auggie adds SessionStart output to the session context from CLI 1.2.0 on;
+earlier versions, 0.36.0 among them, discard it; see
 [Limitations](#limitations). If `bd prime` fails, the hook prints a `beads:`
 notice instead. It exits 0 in every case, and does nothing when `bd` is
 missing or the workspace has no `.beads/`.
@@ -147,7 +147,8 @@ follow steps 2 to 5 below.
    ```
 
 A new Auggie session in the project should then open with the Beads workflow
-context, except under Auggie CLI 0.36.0 (see [Limitations](#limitations)).
+context, except under Auggie CLI before 1.2.0 (see
+[Limitations](#limitations)).
 You can also run the hooks by hand:
 
 ```bash
@@ -346,16 +347,20 @@ and require `Auggie hook tests gate`:
   `.augment/settings.json`, bead writes are neither committed nor pushed by
   these hooks; run `bd dolt commit`, and `bd dolt push --remote origin` where
   the store pushes, before ending such a session.
-- Auggie CLI 0.36.0 runs the SessionStart hook but discards its output, so
-  the `bd prime` context does not reach the agent
-  ([augmentcode/auggie#181](https://github.com/augmentcode/auggie/issues/181)).
-  Until that is fixed, use a workspace rule, which Auggie adds to every
-  prompt: a file in `.augment/rules/` that tells the agent to run `bd prime`
-  at the start of a session. A store with a custom `.beads/PRIME.md` can
-  instead make `.augment/rules/beads-prime.md` the real file and
-  `.beads/PRIME.md` a symlink to it; `bd prime` follows the link, but Auggie
-  skips rule files that are symlinks. That rule carries the `PRIME.md` text
-  only; `bd prime` adds the stored memories.
+- Auggie CLI before 1.2.0, 0.36.0 among them, runs the SessionStart hook
+  but discards its output, so the `bd prime` context does not reach the
+  agent
+  ([augmentcode/auggie#181](https://github.com/augmentcode/auggie/issues/181),
+  fixed in 1.2.0). On such a version, use a workspace rule, which Auggie
+  adds to every prompt: a file in `.augment/rules/` that tells the agent to
+  run `bd prime` at the start of a session. A store with a custom
+  `.beads/PRIME.md` can instead make `.augment/rules/beads-prime.md` the
+  real file and `.beads/PRIME.md` a symlink to it; `bd prime` follows the
+  link, but Auggie skips rule files that are symlinks. That rule carries the
+  `PRIME.md` text only; `bd prime` adds the stored memories. On 1.2.0 or
+  later, remove such a rule, or the context reaches the agent twice. Where
+  `.beads/PRIME.md` is a symlink to the rule, first replace the link with
+  a copy of the rule's text, or `bd prime` loses the custom context.
 - A store the scanner cannot name is reported in a warning rather than
   synced: `bd -C "$X"` where `$X` is known only at run time; an argument
   known only at run time before `--`, as in `bd close "$ID"`, which may be
@@ -388,10 +393,10 @@ and require `Auggie hook tests gate`:
   options (`bd close -- "$ID"`, `bd update --notes x -- "$ID"`). The scan
   then reads it as an operand rather than a possible option, and names the
   store.
-- **No Beads context at session start**: expected under Auggie CLI 0.36.0;
-  see [Limitations](#limitations). Otherwise, check that the session runs
-  under the Auggie CLI, that `.augment/hooks/*.sh` are executable, and that
-  the workspace has a `.beads/`.
+- **No Beads context at session start**: expected under Auggie CLI before
+  1.2.0; see [Limitations](#limitations). Otherwise, check that the session
+  runs under the Auggie CLI, that `.augment/hooks/*.sh` are executable, and
+  that the workspace has a `.beads/`.
 - **A sync keeps waiting on a lock**: a lock whose owner has died is
   reclaimed automatically, but a `bd` the hook started keeps the lock until
   it exits. If no `bd` is running, delete `.beads/.augment-sync.lock`.

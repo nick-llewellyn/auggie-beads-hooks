@@ -1525,7 +1525,7 @@ class Scope:
     def __init__(self, cwd, known, assigns, sealed=False, exported=None,
                  allexport=False, lastpipe=False, monitor=False,
                  physical=False, spelled=True, bash=True, zsh=False,
-                 posix=False):
+                 posix=False, readonly=None, readonly_opaque=False):
         self.cwd = cwd
         self.known = known
         # Whether `cwd` is also how the shell's PWD spells the directory:
@@ -1557,6 +1557,15 @@ class Scope:
         # runs `bd` with no BEADS_DIR at all unless something exported it, and
         # reading every assignment as exported named a store `bd` never saw.
         self.exported = {} if exported is None else exported
+        # The names made readonly, True or UNKNOWN where a `readonly` may or
+        # may not have run. An `unset` of one fails and leaves it as it was;
+        # see `is_readonly`.
+        self.readonly = {} if readonly is None else readonly
+        # Whether a name not in `readonly` may be readonly all the same, as
+        # after something this scan cannot read ran in this shell; see
+        # `seal_opaque`. A new process starts with no name readonly, however
+        # little is known of the environment it inherits.
+        self.readonly_opaque = readonly_opaque
         # `set -a` in force: every later assignment is exported. UNKNOWN when
         # a `set -a` may or may not have run.
         self.allexport = allexport
@@ -1592,7 +1601,8 @@ class Scope:
         return Scope(self.cwd, self.known, dict(self.assigns), self.sealed,
                      dict(self.exported), self.allexport, self.lastpipe,
                      self.monitor, self.physical, self.spelled, self.bash,
-                     self.zsh, self.posix)
+                     self.zsh, self.posix, dict(self.readonly),
+                     self.readonly_opaque)
 
     def last_member_stays(self):
         """Whether a pipeline's last member runs in this shell: True, False
@@ -1698,6 +1708,20 @@ class Scanner:
             raise Unavailable("more work than %d steps" % MAX_STEPS)
 
     # --- assignment state -------------------------------------------------
+
+    def is_readonly(self, name):
+        """Whether `name` is readonly here: True, False or UNKNOWN.
+
+        Only the text makes a name readonly: a new process inherits none, and
+        a subshell keeps its parent's. After a seal, any name may have been
+        made readonly by what the scan could not read, in this shell and not
+        in a process it starts; see `Scope.readonly_opaque`.
+        """
+        if name in self.scope.readonly:
+            return self.scope.readonly[name]
+        if self.scope.readonly_opaque:
+            return UNKNOWN
+        return False
 
     def is_exported(self, name):
         """Whether `name` reaches a child process: True, False or UNKNOWN.
@@ -3508,6 +3532,12 @@ class Scanner:
             if base.exported.get(name, missing) != \
                     inner.exported.get(name, missing):
                 saved.exported[name] = UNKNOWN
+        for name in set(inner.readonly) | set(base.readonly):
+            if base.readonly.get(name, missing) != \
+                    inner.readonly.get(name, missing):
+                saved.readonly[name] = UNKNOWN
+        if base.readonly_opaque != inner.readonly_opaque:
+            saved.readonly_opaque = True
         if base.allexport != inner.allexport:
             saved.allexport = UNKNOWN
         if base.lastpipe != inner.lastpipe:
@@ -3585,6 +3615,8 @@ class Scanner:
                 assigns, exported = self.environment_view(sealed)
                 self.scope.assigns = assigns
                 self.scope.exported = exported
+                self.scope.readonly = {}
+                self.scope.readonly_opaque = False
                 self.scope.allexport = False
                 self.scope.lastpipe = False
                 self.scope.monitor = monitor
@@ -3816,7 +3848,9 @@ class Scanner:
         sets the variable to `y` where it was unset, exported only under `set
         -a`, and turning it off unsets it, export and all. So after `export
         POSIXLY_CORRECT=1; set +o posix`, `bash -c ...` starts out of POSIX
-        mode, and after `set -o posix; export POSIXLY_CORRECT` in it.
+        mode, and after `set -o posix; export POSIXLY_CORRECT` in it. That
+        unset takes a readonly variable too, so a later `POSIXLY_CORRECT=1;
+        unset POSIXLY_CORRECT` leaves the mode off.
         """
         self.posix_mode(state)
         if self.scope.bash is False:
@@ -3826,12 +3860,15 @@ class Scanner:
             self.unset_names.add(name)
             self.scope.assigns[name] = UNSET
             self.scope.exported[name] = False
+            self.scope.readonly[name] = False
         elif state is UNKNOWN:
             # `t && set +o posix` may have unset it, as a conditional `unset`
             # may; see `call_function`.
             self.unset_names.add(name)
             self.scope.assigns[name] = UNKNOWN
             self.scope.exported[name] = UNKNOWN
+            if self.is_readonly(name) is not False:
+                self.scope.readonly[name] = UNKNOWN
         elif self.shell_var(name) is None:
             self.bind(name, "y")
         elif self.scope.allexport is not False and \
@@ -3855,6 +3892,11 @@ class Scanner:
         self.scope.assigns = {"IFS": UNKNOWN}
         self.scope.exported = {}
         self.scope.sealed = OPAQUE
+        # A mark of its own does not outlast the file either: one may make
+        # POSIXLY_CORRECT readonly where `set +o posix` had unset it, or run
+        # `set +o posix` over a readonly one, which unsets it, mark and all.
+        self.scope.readonly = {}
+        self.scope.readonly_opaque = True
         self.functions = {}
         self.functions_sealed = True
         self.possibly_unset = set()
@@ -4058,7 +4100,7 @@ class Scanner:
                 self.in_background(
                     lambda: self.stmt(cmd["Stmt"], conditional))
         elif kind == "DeclClause":
-            self.decl(cmd, conditional)
+            self.decl_clause(cmd, conditional, follows)
         elif kind == "TestClause":
             # `[[ ]]` runs no command and writes no store, but a substitution
             # inside one still runs.
@@ -4315,7 +4357,7 @@ class Scanner:
             self.calling.discard(name)
 
     def call_listed(self, cmd, fields, start, split, conditional, follows,
-                    word, passed=False):
+                    word, passed=False, builtin=None):
         """Runs the call to `word`, a function this text defined.
 
         One an `unset -f` may have removed may also be gone by the call, and
@@ -4365,6 +4407,10 @@ class Scanner:
         exists only where the body ran, so it is possibly unset after the
         call: after `g() { bd() { :; }; }; t && unset -f g; g`, `bd -C /ext
         close X` may write /ext.
+
+        `builtin`, where given, reads the command the shell runs in place of
+        the function, for a clause the parse made of an assignment builtin;
+        see `decl_clause`.
         """
         possibly_unset = word in self.possibly_unset
         bodies = self.functions[word]
@@ -4392,6 +4438,9 @@ class Scanner:
                 del self.functions[word]
 
             def run():
+                if builtin is not None:
+                    builtin()
+                    return
                 self.run_command(cmd, fields, start, split, conditional,
                                  follows, passed=True)
                 if unread:
@@ -4471,7 +4520,30 @@ class Scanner:
         merged[2] = merged[2] or left[2]
         merged[3] = max(merged[3], left[3])
 
-    def decl(self, cmd, conditional):
+    def decl_clause(self, cmd, conditional, follows):
+        """Runs an assignment builtin, or the function of its name this text
+        defined where the shell finds that first.
+
+        The parse makes a clause of `export`, `readonly`, `declare`,
+        `typeset` and `local` wherever one is named first, but a function of
+        the name comes before the builtin as it does before any other; see
+        `function_first`. So after `function readonly { :; }`, `readonly
+        BEADS_DIR` marks nothing in bash outside POSIX mode, and `unset
+        BEADS_DIR` removes it. Where the shell may pass the function by, the
+        builtin is read as well; see `call_listed`.
+        """
+        word = (cmd.get("Variant") or {}).get("Value")
+        first = self.function_first(word) if word in self.functions else False
+        if first is False:
+            self.decl(cmd, conditional)
+            return
+        for arg in cmd.get("Args") or ():
+            self.node_subs(arg)
+        self.call_listed(cmd, None, 0, None, conditional, follows, word,
+                         passed=first is UNKNOWN,
+                         builtin=lambda: self.decl(cmd, conditional, False))
+
+    def decl(self, cmd, conditional, subs=True):
         """Records the assignments an assignment builtin makes.
 
         An assignment builtin is the same thing said as a command, and unlike a
@@ -4484,8 +4556,9 @@ class Scanner:
         # A substitution in any operand runs, the ones that assign nothing
         # included: `export $(bd close X)` runs the write. It runs whatever the
         # command's own reachability is, so the operands are visited for them
-        # before that is consulted.
-        for arg in args:
+        # before that is consulted. `decl_clause` has visited them already
+        # where it read a function as well.
+        for arg in args if subs else ():
             self.node_subs(arg)
         # The parse makes a clause of one only where it is named first, so
         # after a startup or sourced file it may be a function; see
@@ -4503,6 +4576,11 @@ class Scanner:
         variant = (cmd.get("Variant") or {}).get("Value")
         state = None
         functions = False
+        printing = False
+        # `readonly`, and `declare`, `typeset` or `local` with `-r`, make the
+        # names readonly too; see `is_readonly`.
+        readonly = variant == "readonly"
+        unread = cancelled = False
         if variant == "export":
             state = True
         elif variant == "local":
@@ -4514,10 +4592,16 @@ class Scanner:
             if flag is not UNKNOWN and flag.startswith("-") and \
                     "f" in flag[1:]:
                 functions = True
+            if flag is not UNKNOWN and flag.startswith("-") and \
+                    "p" in flag[1:]:
+                printing = True
             if flag is UNKNOWN:
-                # A flag this scan cannot read may be `-x`, `-n` or `-f`, so
-                # what the builtin did to the attribute is unknown.
+                # A flag this scan cannot read may be `-x`, `-n`, `-r`, `-p`
+                # or `-f`, so what the builtin did to the attributes is
+                # unknown, a known `-r` beside it or not: after `declare -r
+                # "$OPT" BEADS_DIR`, OPT holding `-p`, an `unset` removes it.
                 state = UNKNOWN
+                unread = True
             elif flag == "--":
                 break
             elif variant == "export" and flag.startswith("-") and \
@@ -4529,20 +4613,66 @@ class Scanner:
             elif variant != "export" and flag.startswith("+") and \
                     "x" in flag[1:]:
                 state = False
+            if flag is not UNKNOWN and flag.startswith("-") and \
+                    "r" in flag[1:] and variant != "export":
+                readonly = True
+            if flag is not UNKNOWN and flag.startswith("+") and \
+                    "r" in flag[1:] and variant not in ("export", "readonly"):
+                cancelled = True
+        # `+r` takes the command's own `-r` away, wherever it stands, and an
+        # unread flag's with it: `declare -r +r BEADS_DIR` leaves it
+        # writable. A mark set earlier stays, below; `readonly +r` marks.
+        if cancelled:
+            readonly = False
+        elif unread and variant != "export":
+            readonly = UNKNOWN
         if functions:
             return
+        # `declare -p` and `typeset -p` print the names and change nothing,
+        # whatever else they are asked: after `export BEADS_DIR=/ext/.beads;
+        # declare -rp BEADS_DIR`, `unset BEADS_DIR` removes it. `local -p`
+        # prints in bash 5.2, where 3.2 runs it as a plain `local`, so what
+        # it does to the names is unknown. `readonly -p` and `export -p` act
+        # on the names they are given.
+        if printing and variant in ("declare", "typeset"):
+            return
+        if printing and variant == "local":
+            for arg in args:
+                name = (arg.get("Name") or {}).get("Value")
+                if not name:
+                    continue
+                self.forget(name)
+                self.scope.exported[name] = UNKNOWN
+                if readonly and self.scope.readonly.get(name) is not True:
+                    self.scope.readonly[name] = UNKNOWN
+            return
+        if conditional and readonly:
+            readonly = UNKNOWN
         if conditional and state is not None:
             state = UNKNOWN
         for arg in args:
             name = (arg.get("Name") or {}).get("Value")
             if not name:
                 continue
+            # A readonly name refuses an assignment and keeps its value, and
+            # bash carries on outside POSIX mode: after `readonly
+            # BEADS_DIR=/ext/.beads; export BEADS_DIR=/other/.beads`, `bd close
+            # X` writes /ext. `export` gives the attribute all the same,
+            # where `declare -x` and `local` change nothing.
+            refused = False if arg.get("Naked") else self.is_readonly(name)
             # `export OUT` exports a name without changing its value, so only
             # the operands that are assignments assign.
-            if gives_value(arg) or replaces_value(arg):
-                self.assign(arg, conditional)
+            if refused is not True and (gives_value(arg) or
+                                        replaces_value(arg)):
+                self.assign(arg, conditional or refused is UNKNOWN)
             if state is not None:
-                self.scope.exported[name] = state
+                if refused is False or variant == "export":
+                    self.scope.exported[name] = state
+                elif refused is UNKNOWN and \
+                        state is not self.is_exported(name):
+                    self.scope.exported[name] = UNKNOWN
+            if readonly and self.scope.readonly.get(name) is not True:
+                self.scope.readonly[name] = readonly
 
     def assign(self, arg, conditional):
         """Records the assignment node `arg` in this scope.
@@ -5442,13 +5572,20 @@ class Scanner:
                     self.possibly_unset.discard(name)
                 continue
             # bash refuses to unset its readonly SHELLOPTS, which still
-            # carries its options to a child; see `carried_option`.
+            # carries its options to a child; see `carried_option`. Every
+            # shell refuses to unset a name the text made readonly, which
+            # keeps its value: after `readonly BEADS_DIR=/ext/.beads; export
+            # BEADS_DIR; unset BEADS_DIR`, `bd close X` writes /ext.
             refused = self.scope.bash if name == "SHELLOPTS" else False
-            if refused is True:
+            readonly = self.is_readonly(name)
+            if refused is True or readonly is True:
                 continue
+            if readonly is UNKNOWN:
+                refused = UNKNOWN
             self.unset_names.add(name)
             if name == "POSIXLY_CORRECT":
-                self.posix_mode(UNKNOWN if conditional else False)
+                self.posix_mode(UNKNOWN if conditional or refused is UNKNOWN
+                                else False)
             if conditional or refused is UNKNOWN:
                 self.scope.assigns[name] = UNKNOWN
                 self.scope.exported[name] = UNKNOWN

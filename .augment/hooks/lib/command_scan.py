@@ -382,6 +382,9 @@ DIR_STACK_ROTATE = re.compile(r"^[-+][0-9]+$")
 # 'X-Y=1' bd -C /external close X` runs `bd`. Matched against the identifier
 # shape, the word was read as the command and the write was missed.
 ASSIGN_WORD = re.compile(r"^[^=]+=")
+# An argument shaped like an assignment whose value opens with an unquoted
+# `~`; see `assignment_tilde`.
+ASSIGN_TILDE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=~")
 IDENTIFIER = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 
 # The arithmetic operators that assign to their left operand, and the unary
@@ -2142,9 +2145,50 @@ class Scanner:
                                  assign=assignment_name(word, self.raw),
                                  split=may_split(word, self.raw),
                                  dash=may_be_option(word)))
-            else:
-                out.extend(fields)
+            elif fields:
+                out.append(self.assignment_tilde(word, fields[0]))
+                out.extend(fields[1:])
         return out
+
+    def assignment_tilde(self, word, field):
+        """`field`, the first argument `word` gives, with the `~` after its
+        `=` expanded where it is shaped like an assignment and the shell
+        expands it there. The shell expands it before splitting the word, so
+        `env BEADS_DIR=~/x$TAIL` expands it where TAIL splits too.
+
+        bash expands an unquoted `~` after the `=` of such an argument to any
+        command, outside POSIX mode: `env BEADS_DIR=~/ext/.beads bd close X`
+        writes $HOME/ext. Read as written, the value was a relative path, and
+        the store named sat below the launch directory. bash in POSIX mode,
+        dash, ksh and zsh leave the `~` as written, and so does a quoted one.
+        The prefix runs to the first unquoted `/` or `:`; one holding a
+        quoted character, as `~\\/store` and `~us\\er` do, or running into a
+        quoted or expanded part, is left as it is, as the shell leaves it.
+        A line continuation is no quoting, and the parse has removed it.
+        Where the shell or its mode is in doubt, the value is unknown.
+        """
+        parts = list(word_parts(word, nulls=True))
+        if not parts:
+            return field
+        part, quoted = parts[0]
+        literal = part.get("Value", "") if part["Type"] == "Lit" else ""
+        if quoted or not ASSIGN_TILDE.match(literal):
+            return field
+        name, _, rest = literal.partition("=")
+        end = min([rest.find(sep) for sep in "/:" if sep in rest] or
+                  [len(rest)])
+        if "\\" in rest[:end] or end == len(rest) and len(parts) > 1:
+            return field
+        bash, posix = self.scope.bash, self.scope.posix
+        if bash is False or posix is True:
+            return field
+        if bash is UNKNOWN or posix is UNKNOWN:
+            return Field(UNKNOWN, assign=name)
+        value = field.value[len(name) + 1:]
+        prefix = self.expand_tilde(value[:end])
+        if prefix is UNKNOWN:
+            return Field(UNKNOWN, assign=name)
+        return Field(name + "=" + prefix + value[end:])
 
     def assigned_value(self, word):
         """The value `word` gives a variable, or UNKNOWN.

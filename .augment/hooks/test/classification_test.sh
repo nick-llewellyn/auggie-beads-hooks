@@ -2774,6 +2774,24 @@ check_target "$BASE/~/store" 'OUT="~/store"; bd -C "$OUT" close CHR-1'
 check_unresolved 'HOME=$(pwd); OUT=~/store; bd -C "$OUT" close CHR-1'
 # `~` past the first character is literal, being no home reference at all.
 check_target "$BASE/x~/store" 'OUT=x~/store; bd -C "$OUT" close CHR-1'
+# bash expands it after the `=` of an argument shaped like an assignment, to
+# any command, outside POSIX mode. In POSIX mode, quoted, or in dash, it is
+# literal, so the value is relative; where the mode is in doubt, so is the
+# value.
+check_target '/tmp/home/store' 'HOME=/tmp/home; env BEADS_DIR=~/store/.beads bd close CHR-1'
+check_target "$BASE/~/store" 'HOME=/tmp/home; set -o posix; env BEADS_DIR=~/store/.beads bd close CHR-1'
+check_target "$BASE/~/store" 'HOME=/tmp/home; env "BEADS_DIR=~/store/.beads" bd close CHR-1'
+# A backslash in the prefix quotes it too, an escaped `/` included, while one
+# after the prefix does not, nor does a line continuation within it.
+check_target "$BASE/~/store" 'HOME=/tmp/home; env BEADS_DIR=~\/store/.beads bd close CHR-1'
+check_target '/tmp/home/store' 'HOME=/tmp/home; env BEADS_DIR=~/store\/.beads bd close CHR-1'
+# The `~` is expanded before the word is split, so a suffix that splits into
+# several arguments leaves the first one expanded.
+check_target '/tmp/home/store' "HOME=/tmp/home; CS_TAIL='/.beads CS_OTHER=1'; env BEADS_DIR=~/store\$CS_TAIL bd close CHR-1"
+check_target '/tmp/home/store' 'HOME=/tmp/home; env BEADS_DIR=~\
+/store/.beads bd close CHR-1'
+check_target "$BASE/~/store" "HOME=/tmp/home; dash -c 'env BEADS_DIR=~/store/.beads bd close CHR-1'"
+check_unresolved 'HOME=/tmp/home; t && set -o posix; env BEADS_DIR=~/store/.beads bd close CHR-1'
 
 # `~user` names that user's home from the passwd database, which HOME cannot
 # override. Handling only `~` and `~/` left it unexpanded -- and an unexpanded

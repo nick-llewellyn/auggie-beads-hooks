@@ -10,8 +10,12 @@ on:
     branches: [main]
   workflow_dispatch:
 
+# A push to main gets a group of its own, so a later push never cancels its
+# run: each push run tests only what that push changed (see `changes`), and a
+# cancelled one would leave its commits untested. A newer run on the same pull
+# request still cancels the one before it, since each diffs the whole request.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'push' && github.sha || github.ref }}
   cancel-in-progress: true
 
 permissions:

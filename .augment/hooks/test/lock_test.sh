@@ -924,6 +924,28 @@ CONV=conv-a FIRE_WAIT=true fire "sleep 5; bd -C $WAITED close CHR-1"
 rm -rf "$OUT" "$PARENT" "$WAITED"
 teardown
 
+# --- an Auggie 1.x background call keeps its stores for SessionEnd -----
+# 1.x marks a call it runs in the background with `background: true` in
+# `tool_input` in place of `wait: false`, and fires PostToolUse as the job
+# starts (#44). A 1.x call without it is waited for.
+setup
+OUT=$(mktemp -d)
+mkdir -p "$OUT/.beads"
+WAITED=$(mktemp -d)
+mkdir -p "$WAITED/.beads"
+ASYNC="$WS/.beads/.augment-sync.async"
+CONV=conv-a event "sleep 5; bd -C $OUT close CHR-1" |
+  jq '.tool_name = "bash" | .tool_input.background = true' |
+  "$BASH_UNDER_TEST" "$HOOK" >/dev/null 2>&1
+registered "$OUT" "$ASYNC" && report ok ||
+  report bad "a 1.x background call must keep its stores for SessionEnd (async: $(reg_dump "$ASYNC"))"
+CONV=conv-a event "sleep 5; bd -C $WAITED close CHR-1" |
+  jq '.tool_name = "bash"' | "$BASH_UNDER_TEST" "$HOOK" >/dev/null 2>&1
+! registered "$WAITED" "$ASYNC" && report ok ||
+  report bad "a 1.x call waited for must not keep its store as written in the background (async: $(reg_dump "$ASYNC"))"
+rm -rf "$OUT" "$WAITED"
+teardown
+
 # --- a background record outlives a hand-off that failed ---------------
 # Once the record is gone the registry entry is the only thing naming the
 # store, so a SessionEnd that could not write one must keep the record. An

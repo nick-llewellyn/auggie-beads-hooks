@@ -118,9 +118,11 @@ completes, or when the store no longer exists.
 
 A write the command runs in the background, after `&`, in a coprocess or in a
 process substitution, can land after the hook has synced, as can any write in
-a `launch-process` call made with `wait: false`. Its external store is also recorded, with the
-session's `conversation_id`, in the first root's `.beads/.augment-sync.async`,
-which only SessionEnd reads. Each SessionEnd moves every store listed there
+a `launch-process` call made with `wait: false`, or in a call Auggie CLI 1.x
+runs in the background, which it marks with `background: true`. Its external
+store is also recorded, with the session's `conversation_id`, in the first
+root's `.beads/.augment-sync.async`, which only SessionEnd reads. Each
+SessionEnd moves every store listed there
 back into `.augment-sync.external` and syncs it, then removes its own
 session's records once the registry holds them.
 
@@ -443,11 +445,12 @@ and require `Auggie hook tests gate`:
   as writing a store other than the one it writes; how often that happens
   has not been measured.
 - Only `&`, `coproc`, process substitution, a wrapper that detaches its
-  command, such as `setsid -f` or `sudo -b`, and a `launch-process` call
-  made with `wait: false` count as background. A `wait: true` call that
-  returns at `max_wait_seconds` with its command still running is not
-  recognised, and a background write still running when the session ends
-  is not waited for.
+  command, such as `setsid -f` or `sudo -b`, a `launch-process` call made
+  with `wait: false`, and an Auggie CLI 1.x call with `background: true`
+  count as background. A `wait: true` call that returns at
+  `max_wait_seconds` with its command still running is not recognised, and
+  a background write still running when the session ends is not waited
+  for.
 - The push always targets the remote named `origin`.
 - The hooks add to, and do not replace, the git hook shims `bd init`
   installs under `.beads/hooks/`.

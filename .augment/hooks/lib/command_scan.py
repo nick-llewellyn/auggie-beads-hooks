@@ -4047,9 +4047,17 @@ class Scanner:
         such mode, and refuse that `set`. Where the variable got a value this
         scan did not read, the mode is in doubt: a `for` binding it changes
         nothing, while `read` or `((...))` turns it on.
+
+        Where the shell may or may not be bash, as `sh` may, the change is
+        in doubt: dash and busybox ash ignore the variable, and busybox
+        reports `set -o posix` and carries on. Read as made, `sh -c 'unset()
+        { :; }; POSIXLY_CORRECT=1; unset BEADS_DIR; ...'` ran the builtin,
+        where ash runs the function and keeps the store BEADS_DIR names.
         """
-        if self.scope.bash is not False:
+        if self.scope.bash is True:
             self.scope.posix = state
+        elif self.scope.bash is UNKNOWN and state is not self.scope.posix:
+            self.scope.posix = UNKNOWN
 
     def posix_option(self, state):
         """Records POSIX mode as `set -o posix` or `set +o posix` leaves it,

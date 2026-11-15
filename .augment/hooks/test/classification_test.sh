@@ -2408,6 +2408,19 @@ check_target "$STORE" "unset BEADS_DB; cd $STORE; BEADS_DIR=/tmp/store/.beads ba
 check_target "$STORE" "unset BEADS_DB; cd $STORE; POSIXLY_CORRECT= BEADS_DIR=/tmp/store/.beads bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
 check_unresolved "unset BEADS_DB; cd $STORE; BEADS_DIR=/tmp/store/.beads sh -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
 check_target "$STORE" "unset BEADS_DB; cd $STORE; BEADS_DIR=/tmp/store/.beads dash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"
+# In `sh` a change of mode is in doubt too, since dash and busybox ash have
+# none: ash ignores POSIXLY_CORRECT and carries on past `set -o posix`, so it
+# still runs the function, and keeps a special builtin's prefix after the
+# variable is unset, where bash run as `sh` drops it (#71). bash itself
+# changes mode.
+check_unresolved "unset BEADS_DB; cd $STORE; BEADS_DIR=/tmp/store/.beads sh -c 'unset() { :; }; POSIXLY_CORRECT=1; unset BEADS_DIR; bd close CHR-1'"
+check_unresolved "unset BEADS_DB; cd $STORE; BEADS_DIR=/tmp/store/.beads sh -c 'unset() { :; }; export POSIXLY_CORRECT=1; unset BEADS_DIR; bd close CHR-1'"
+check_unresolved "unset BEADS_DB; cd $STORE; BEADS_DIR=/tmp/store/.beads sh -c 'unset() { :; }; set -o posix; unset BEADS_DIR; bd close CHR-1'"
+check_unresolved "unset BEADS_DIR BEADS_DB; cd $STORE; sh -c 'unset POSIXLY_CORRECT; export BEADS_DIR; BEADS_DIR=/tmp/store/.beads :; bd close CHR-1'"
+check_unresolved "unset BEADS_DIR BEADS_DB; cd $STORE; sh -c 'POSIXLY_CORRECT=1; unset POSIXLY_CORRECT; export BEADS_DIR; BEADS_DIR=/tmp/store/.beads :; bd close CHR-1'"
+check_unresolved "unset BEADS_DIR BEADS_DB; cd $STORE; sh -c 'set +o posix; export BEADS_DIR; BEADS_DIR=/tmp/store/.beads :; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DB; cd $STORE; BEADS_DIR=/tmp/store/.beads bash -c 'unset() { :; }; POSIXLY_CORRECT=1; unset BEADS_DIR; bd close CHR-1'"
+check_target "$STORE" "unset BEADS_DIR BEADS_DB; cd $STORE; bash -c 'unset POSIXLY_CORRECT; export BEADS_DIR; BEADS_DIR=/tmp/store/.beads :; bd close CHR-1'"
 # POSIX_PEDANTIC in its environment starts bash in that mode too, and then it
 # reads no BASH_ENV; assigned in a running shell, it changes nothing.
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/store/.beads; cd $STORE; POSIX_PEDANTIC=1 bash -c 'unset() { :; }; unset BEADS_DIR; bd close CHR-1'"

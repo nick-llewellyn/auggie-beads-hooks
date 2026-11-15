@@ -1033,7 +1033,12 @@ if [ "$EVENT_NAME" = "PostToolUse" ]; then
   # Passed through empty instead, which the scanner reads as an unknown cwd: a
   # relative target stays unresolved and the write still counts, so the roots
   # sync and the warning says which store could not be named.
-  LAUNCH_CWD=$(jq -r '.tool_input.cwd // ""' <<<"$EVENT_JSON")
+  #
+  # Auggie 0.x carries the directory in `tool_input.cwd`, and 1.x, which has
+  # none there, as the event's top-level `cwd`. Read only from the first, a 1.x
+  # event read as naming no directory, and a plain `bd` write was unresolved.
+  # Where both are present, `tool_input.cwd` is the tool call's own.
+  LAUNCH_CWD=$(jq -r '.tool_input.cwd // .cwd // ""' <<<"$EVENT_JSON")
 
   # A launch with `wait: false` returns as its command starts, so any write
   # in it may land after this sync, as one behind `&` may: `sleep 6; bd -C

@@ -197,9 +197,16 @@ them:
 3. Bring each project's copy level with a release, an annotated tag
    `vX.Y.Z` on `main` listed on the repository's Releases page. Copy the
    files under `.augment/hooks/` in a checkout of the tag over the copy's,
-   and delete only the upstream files the release dropped, which
-   `git diff --name-status <old-tag> <new-tag> -- .augment/hooks` lists as
-   `D`, `<old-tag>` being the release the copy was last brought level with.
+   and delete only the upstream files the release dropped. To list them,
+   fetch the tag the copy was last brought level with, which the shallow
+   clone from [Existing project](#existing-project) step 1 lacks, then
+   compare the two tags; each file marked `D` was dropped:
+
+   ```bash
+   git fetch origin tag <old-tag>
+   git diff --name-status --no-renames <old-tag> <new-tag> -- .augment/hooks
+   ```
+
    Leave the project's own hook files untouched. Then restore the lines that
    differ for the project's own reasons, such as temporary-file prefixes. A
    single fix needed before the next release can be applied on its own, from

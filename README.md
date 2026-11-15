@@ -37,9 +37,8 @@ existing one.
 | `shfmt` | 3.8.0 | 3.8.0, 3.12.0, 3.14.1 |
 | `python3` | 3.9.6 | 3.9.6, 3.12.3, 3.15.2 |
 
-A minimum is the oldest version the hooks are checked against. Older
-versions are not supported, though some may work. The hooks run under bash;
-zsh is not needed.
+A minimum is the oldest version supported. Older versions may work but are
+not supported. The hooks run under bash; zsh is not needed.
 
 - **Auggie CLI:** hooks fire only under the CLI; see
   [Limitations](#limitations). Before 1.2.0, the SessionStart context does
@@ -195,12 +194,13 @@ them:
    while working in a project's copy, with a test that fails without it.
 2. Run the three suites here, and open the pull request.
 3. Bring each project's copy level with a release, an annotated tag
-   `vX.Y.Z` on `main` listed on the repository's Releases page: copy
-   `.augment/hooks/` from a checkout of the tag, or apply the commits since
-   the copy's last release with `git format-patch` and `git apply`. A fix
-   needed before the next release can be applied on its own the same way.
-   Adjust only lines that differ there for the project's own reasons, such
-   as temporary-file prefixes.
+   `vX.Y.Z` on `main` listed on the repository's Releases page: replace the
+   copy's `.augment/hooks/` with the one in a checkout of the tag, then
+   restore the lines that differ there for the project's own reasons, such
+   as temporary-file prefixes. A single fix needed before the next release
+   can be applied on its own:
+   `git format-patch -1 <commit> -- .augment/hooks`, then `git apply` in the
+   project.
 4. Run the three suites in each copy before pushing, and name the release
    tag in the commit, or the upstream commit for a fix applied on its own.
 5. On every refresh, check that the copy still ignores the hook's state

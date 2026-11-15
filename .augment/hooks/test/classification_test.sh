@@ -2860,6 +2860,14 @@ check_target '/tmp/home/one:~/two' 'HOME=/tmp/home; env BEADS_DIR=~/one:"~"/two/
 check_target '/a:~/b' 'HOME=/tmp/home; OUT=/a\:~/b; bd -C "$OUT" close CHR-1'
 check_target '/a:~/x/b' 'HOME=/tmp/home; CS_S=/x; OUT=/a:~$CS_S/b; bd -C "$OUT" close CHR-1'
 check_target '/tmp/home/one:~/two' 'HOME=/tmp/home; bd -C ~/one:~/two close CHR-1'
+# The leading prefix is read where quoting still shows: an escaped or quoted
+# `:` or `/` in it, or an expansion it runs into, leaves it as written. A
+# home holding a pattern character is a literal path all the same.
+check_target "$BASE/~:~/two" 'HOME=/tmp/home; OUT=~\:~/two; bd -C "$OUT" close CHR-1'
+check_target "$BASE/~:/store" 'HOME=/tmp/home; OUT=~":"/store; bd -C "$OUT" close CHR-1'
+check_target "$BASE/~/store" 'HOME=/tmp/home; OUT=~"/"store; bd -C "$OUT" close CHR-1'
+check_target "$BASE/~/a" 'HOME=/tmp/home; CS_X=/a; OUT=~$CS_X; bd -C "$OUT" close CHR-1'
+check_target '/x:/tmp/h[1]/two' 'HOME="/tmp/h[1]"; env BEADS_DIR=/x:~/two/.beads bd close CHR-1'
 
 # `~user` names that user's home from the passwd database, which HOME cannot
 # override. Handling only `~` and `~/` left it unexpanded -- and an unexpanded

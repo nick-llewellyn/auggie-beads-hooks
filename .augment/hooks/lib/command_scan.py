@@ -2237,12 +2237,18 @@ class Scanner:
         if not field.tilde:
             return field.value
         # In an assignment the prefix also ends at a `:`: `X=~:~/b` holds
-        # $HOME:$HOME/b.
-        value = field.value
-        end = min([value.find(sep) for sep in "/:" if sep in value] or
-                  [len(value)])
-        prefix = self.expand_tilde(value[:end])
-        return UNKNOWN if prefix is UNKNOWN else prefix + value[end:]
+        # $HOME:$HOME/b. It is read from the word's opening literal, where
+        # quoting still shows: one holding a quoted character or running into
+        # another part is left as written, as `X=~\:b`, `X=~":"b` and `X=~$Y`
+        # are.
+        parts = word.get("Parts") or ()
+        literal = parts[0].get("Value", "")
+        end = min([literal.find(sep) for sep in "/:" if sep in literal] or
+                  [len(literal)])
+        if "\\" in literal[:end] or end == len(literal) and len(parts) > 1:
+            return field.value
+        prefix = self.expand_tilde(literal[:end])
+        return UNKNOWN if prefix is UNKNOWN else prefix + field.value[end:]
 
     def colon_tildes(self, word):
         """`word` with each tilde prefix after an unquoted `:` expanded, or
@@ -2255,8 +2261,9 @@ class Scanner:
         one the write never opened. As for the first, the prefix runs to the
         next `/` or `:`, and one holding a backslash or running into another
         part, as `:~$X` does, is left as written. Only an unquoted literal
-        part holds one, so those parts are rewritten, their backslashes
-        doubled for the unescaping `expand` does.
+        part holds one, so those parts are rewritten, with a backslash before
+        each backslash and pattern character of the expansion, which the shell
+        does not match on paths, for the unescaping `expand` does.
         """
         parts = word.get("Parts") or ()
         out, changed = [], False
@@ -2277,7 +2284,7 @@ class Scanner:
                 home = self.expand_tilde(rest[:end])
                 if home is UNKNOWN:
                     return UNKNOWN
-                home = home.replace("\\", "\\\\")
+                home = re.sub(r"([\\*?\[])", r"\\\1", home)
                 text = text[:pos] + home + rest[end:]
                 pos += len(home)
                 changed = True

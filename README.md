@@ -28,13 +28,34 @@ existing one.
 
 ## Requirements
 
-- The Auggie CLI, with hooks (tested with 0.36.0 and 1.2.0). Hooks fire
-  only under the CLI; see [Limitations](#limitations).
-- `bd` (tested with 1.3.1).
-- `bash` 3.2 or later. macOS `/bin/bash` (3.2) is supported and tested.
-- `jq`. Without it, the sync hook warns and does nothing.
-- `shfmt` and `python3`, for the scanner. Without them, the sync hook warns
-  and syncs the workspace roots after every shell command as a precaution.
+| Tool | Minimum | Tested with |
+| --- | --- | --- |
+| Auggie CLI | 0.36.0 | 0.36.0, 1.2.0 |
+| `bd` | 1.3.4 | 1.3.4 |
+| `bash` | 3.2 | 3.2.57 (macOS `/bin/bash`), 5.2.21, 5.3.9 |
+| `jq` | 1.7.1 | 1.7.1, 1.8.2 |
+| `shfmt` | 3.8.0 | 3.8.0, 3.12.0, 3.14.1 |
+| `python3` | 3.9.6 | 3.9.6, 3.12.3, 3.15.2 |
+
+A minimum is the oldest version supported. Older versions may work but are
+not supported. The hooks run under bash; zsh is not needed.
+
+- **Auggie CLI:** hooks fire only under the CLI; see
+  [Limitations](#limitations). Before 1.2.0, the SessionStart context does
+  not reach the agent.
+- **`bd`:** checked on an embedded store and on a server-mode store (see
+  [A shared local Dolt SQL server](#a-shared-local-dolt-sql-server)). The
+  hooks run `bd prime`, `bd config get`, `bd dolt commit` and
+  `bd dolt push --remote origin`.
+- **`bash`:** macOS `/bin/bash` 3.2 is supported, and CI runs the suites
+  under it.
+- **`jq`:** without it, the sync hook warns and does nothing.
+- **`shfmt` and `python3`**, for the scanner: without them, the sync hook
+  warns and syncs the workspace roots after every shell command as a
+  precaution. An `shfmt` older than the minimum may lack the `--to-json`
+  flag the scanner uses, with the same result: 3.4.3, which `apt` installs
+  on Ubuntu 22.04, lacks it. `apt` installs 3.8.0 on Ubuntu 24.04 and
+  3.12.0 on Ubuntu 26.04.
 
 ## How it works
 
@@ -115,31 +136,36 @@ retries it. `settings.json` gives the sync hook 60 seconds and the prime hook
 
 Create a repository from this template, with **Use this template** on GitHub
 or `gh repo create <name> --template nick-llewellyn/auggie-beads-hooks`, then
-follow steps 2 to 5 below.
+follow steps 2 to 6 below.
 
 ### Existing project
 
 1. Copy the files, keeping their executable bits:
 
    ```bash
-   git clone --depth 1 https://github.com/nick-llewellyn/auggie-beads-hooks /tmp/auggie-beads-hooks
+   git clone --depth 1 --branch <tag> https://github.com/nick-llewellyn/auggie-beads-hooks /tmp/auggie-beads-hooks
    mkdir -p .augment .github/workflows
    cp -Rp /tmp/auggie-beads-hooks/.augment/hooks .augment/
    cp -p /tmp/auggie-beads-hooks/.github/workflows/auggie-hooks.yaml .github/workflows/
    ```
+
+   `<tag>` is the latest release, from the repository's Releases page.
 
    If the project has no `.augment/settings.json`, copy that file too. If it
    has one, add the three entries from this repository's file to its `hooks`
    object. The commands are relative paths, which Auggie resolves against the
    workspace root.
 
-2. Initialise Beads if the project does not use it yet: `bd init`. Add
+2. On Auggie CLI before 1.2.0, change the PostToolUse matcher in
+   `.augment/settings.json` from `bash` to `launch-process`; see
+   [PostToolUse and SessionEnd](#posttooluse-and-sessionend-beads-syncsh).
+3. Initialise Beads if the project does not use it yet: `bd init`. Add
    `--skip-agents` to leave out the Claude Code, Codex and Cursor files it
    would otherwise generate.
-3. Choose where the store syncs; see the next section.
-4. Ignore the hook's state files; see
+4. Choose where the store syncs; see the next section.
+5. Ignore the hook's state files; see
    [Git ignores](#git-ignores-for-augment-sync-state).
-5. Commit, and check that git recorded the executable bits. This prints
+6. Commit, and check that git recorded the executable bits. This prints
    nothing when they are all set:
 
    ```bash
@@ -168,11 +194,37 @@ them:
 1. Make every change to `.augment/hooks/` here first, including a fix found
    while working in a project's copy, with a test that fails without it.
 2. Run the three suites here, and open the pull request.
-3. Apply the same commit to each project's copy, typically with
-   `git format-patch` and `git apply`. Adjust only lines that differ there
-   for the project's own reasons, such as temporary-file prefixes.
-4. Run the three suites in each copy before pushing, and say in the commit
-   which upstream commit it ports.
+3. Bring each project's copy level with a release, an annotated tag
+   `vX.Y.Z` on `main` listed on the repository's Releases page. Copy the
+   files under `.augment/hooks/` in a checkout of the tag over the copy's,
+   and delete only the upstream files the release dropped. To list them,
+   fetch the tag the copy was last brought level with, which the shallow
+   clone from [Existing project](#existing-project) step 1 lacks, then
+   compare the two tags; each file marked `D` was dropped:
+
+   ```bash
+   git fetch origin tag <old-tag>
+   git diff --name-status --no-renames <old-tag> <new-tag> -- .augment/hooks
+   ```
+
+   Leave the project's own hook files untouched. Then restore the lines that
+   differ for the project's own reasons, such as temporary-file prefixes. A
+   single fix needed before the next release can be applied on its own, from
+   a checkout of this repository:
+
+   ```bash
+   git format-patch -1 --stdout <commit> -- .augment/hooks | git -C /path/to/project apply
+   ```
+
+4. Run the three suites in each copy before pushing, and name the release
+   tag in the commit, or the upstream commit for a fix applied on its own.
+5. On every refresh, check that the copy still ignores the hook's state
+   files; see [Git ignores](#git-ignores-for-augment-sync-state).
+
+A project that runs the hooks by path from a local checkout of this
+repository, rather than holding a copy, should point at a checkout of a
+release tag, not at a working clone, whose hooks change whenever its branch
+does.
 
 A review finding raised on a project's pull request is answered there, but
 fixed here first, so the copies stay identical apart from those adjusted
@@ -241,10 +293,11 @@ each write to the database's history.
    ```
 
 4. Keep the store local: `bd config set dolt.auto-push false`.
-5. Keep `dolt_server_port` in `.beads/metadata.json`, although `bd` reports
-   the field as deprecated. Without it, and without the git-ignored
-   `.beads/dolt-server.port`, `bd` starts a server of its own on a random
-   port.
+5. Keep `dolt_server_port` in `.beads/metadata.json`. `bd` 1.3.4 reports
+   the field as deprecated, warning that it "can cause cross-project data
+   leakage", and names the git-ignored `.beads/dolt-server.port` as the
+   primary source. Without either, `bd` starts a server of its own on a
+   random port.
 
 Further clones on the same machine share the database and need no `bd init`.
 Git does not copy `core.hooksPath` into a clone, so if the project tracks the
@@ -294,6 +347,11 @@ Each prints `<suite>: pass=N fail=0` and exits non-zero on any failure. On
 macOS, run them with `/bin/bash` to cover bash 3.2: the suites run the hooks
 under the interpreter that runs them. A few stderr lines, such as
 `Permission denied`, come from cases that cause failures on purpose.
+
+In a container, run the suites as a user other than root and with an init
+process (`docker run --init`). The lock suite makes `.beads` read-only,
+which root ignores, and expects a killed hook's orphaned children to be
+reaped, which needs an init.
 
 ## CI with GitHub Actions
 
@@ -366,6 +424,24 @@ and require `Auggie hook tests gate`:
   known only at run time before `--`, as in `bd close "$ID"`, which may be
   an option such as `--db=<path>`; a plain `bd` in a directory the event did
   not report; or script run through `eval`.
+- Auggie CLI 1.x events carry the directory a command ran in as a top-level
+  `cwd`, but the hook reads only `tool_input.cwd`
+  ([#65](https://github.com/nick-llewellyn/auggie-beads-hooks/issues/65)),
+  so under 1.x the scan has no directory to start from. A plain `bd`, with
+  no `-C`, `--db`, `BEADS_DIR` or `BEADS_DB`, or a relative `bd -C <dir>`,
+  then cannot be resolved: the hook syncs the workspace roots and warns that
+  a store could not be resolved, without naming it. A store outside the roots
+  that such a call wrote is neither synced nor recorded for SessionEnd. Each
+  command starts in the workspace root, and a `cd` in one does not carry
+  over to the next, so start the command itself with an absolute `cd`, as
+  in `cd /path/to/project && bd close X-1`.
+- Auggie CLI 1.2.0 was seen running shell commands in zsh on macOS, where
+  zsh is the default login shell, while the scanner reads every command
+  with bash's rules
+  ([#66](https://github.com/nick-llewellyn/auggie-beads-hooks/issues/66)).
+  A command that relies on a difference between the two shells may be read
+  as writing a store other than the one it writes; how often that happens
+  has not been measured.
 - Only `&`, `coproc`, process substitution, a wrapper that detaches its
   command, such as `setsid -f` or `sudo -b`, and a `launch-process` call
   made with `wait: false` count as background. A `wait: true` call that

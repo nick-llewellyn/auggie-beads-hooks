@@ -3320,6 +3320,10 @@ check_unresolved "unset BEADS_DIR BEADS_DB; cs_f() { local -p BEADS_DIR=/tmp/ext
 check_target '/tmp/real' 'OUT=/tmp/old; declare OUT=/tmp/real -p 2>/dev/null; bd -C "$OUT" close CHR-1'
 check_target '/tmp/real' 'OUT=/tmp/old; typeset OUT=/tmp/real -p 2>/dev/null; bd -C "$OUT" close CHR-1'
 check_target '/tmp/old' 'OUT=/tmp/old; declare -p OUT=/tmp/real >/dev/null; bd -C "$OUT" close CHR-1'
+# An unquoted word that expands to nothing is no operand, so a `-p` after it
+# is still an option; a quoted empty one is an operand, and ends them.
+check_target '/tmp/old' 'EMPTY=; OUT=/tmp/old; declare $EMPTY -p OUT=/tmp/real >/dev/null; bd -C "$OUT" close CHR-1'
+check_target '/tmp/real' 'EMPTY=; OUT=/tmp/old; declare "$EMPTY" -p OUT=/tmp/real 2>/dev/null; bd -C "$OUT" close CHR-1'
 # A `-r` after the operand makes nothing readonly: the name takes a later
 # assignment, and an `unset` removes it. The default in `${W:-...}` is not
 # read, so that store stays unresolved.

@@ -4808,10 +4808,15 @@ class Scanner:
         # and a `bd -C "$OUT"` after it named a store the write never
         # opened. An operand is an assignment, a bare name, or any readable
         # word that does not start with `-` or `+`; a word this scan cannot
-        # read may be either, and is read as below.
+        # read may be either, and is read as below. A word that expands to
+        # no field at all is no word to the builtin: `declare $EMPTY -p
+        # OUT=/real` still only prints, where a quoted `"$EMPTY"` is an
+        # operand.
         for arg in args:
             if arg.get("Name") or not arg.get("Naked"):
                 break
+            if self.expand(arg.get("Value")) == []:
+                continue
             flag = self.assigned_value(arg.get("Value"))
             if flag is not UNKNOWN and not flag.startswith(("-", "+")):
                 break

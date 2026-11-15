@@ -3324,6 +3324,12 @@ check_target '/tmp/old' 'OUT=/tmp/old; declare -p OUT=/tmp/real >/dev/null; bd -
 # is still an option; a quoted empty one is an operand, and ends them.
 check_target '/tmp/old' 'EMPTY=; OUT=/tmp/old; declare $EMPTY -p OUT=/tmp/real >/dev/null; bd -C "$OUT" close CHR-1'
 check_target '/tmp/real' 'EMPTY=; OUT=/tmp/old; declare "$EMPTY" -p OUT=/tmp/real 2>/dev/null; bd -C "$OUT" close CHR-1'
+# A word's fields are its flags, split as the builtin receives them. A word
+# that cannot be expanded may be flags or the first operand, so what follows
+# it is in doubt.
+check_target '/tmp/old' 'OPT=" -x"; OUT=/tmp/old; declare $OPT -p OUT=/tmp/real >/dev/null; bd -C "$OUT" close CHR-1'
+check_target '/tmp/real' 'OPT="-x -r"; OUT=/tmp/old; declare $OPT OUT=/tmp/real; bd -C "$OUT" close CHR-1'
+check_unresolved 'OUT=/tmp/old; declare * -p OUT=/tmp/real >/dev/null 2>&1; bd -C "$OUT" close CHR-1'
 # A `-r` after the operand makes nothing readonly: the name takes a later
 # assignment, and an `unset` removes it. The default in `${W:-...}` is not
 # read, so that store stays unresolved.

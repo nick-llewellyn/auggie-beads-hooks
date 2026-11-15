@@ -3313,6 +3313,19 @@ check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; typeset
 check_target "$STORE" "unset BEADS_DIR BEADS_DB; BEADS_DIR=/tmp/ext/.beads; declare -xp BEADS_DIR >/dev/null; cd $STORE; bd close CHR-1"
 check_target '/tmp/ext' "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; readonly -p BEADS_DIR >/dev/null; unset BEADS_DIR; cd $STORE; bd close CHR-1"
 check_unresolved "unset BEADS_DIR BEADS_DB; cs_f() { local -p BEADS_DIR=/tmp/ext/.beads >/dev/null; export BEADS_DIR; cd $STORE; bd close CHR-1; }; cs_f"
+# The options end at the first operand, as bash's parser ends them: after it,
+# a word that looks like an option is an operand bash reports as an invalid
+# name. `declare OUT=/real -p` assigns /real, where `-p` before the operand
+# still only prints (#68).
+check_target '/tmp/real' 'OUT=/tmp/old; declare OUT=/tmp/real -p 2>/dev/null; bd -C "$OUT" close CHR-1'
+check_target '/tmp/real' 'OUT=/tmp/old; typeset OUT=/tmp/real -p 2>/dev/null; bd -C "$OUT" close CHR-1'
+check_target '/tmp/old' 'OUT=/tmp/old; declare -p OUT=/tmp/real >/dev/null; bd -C "$OUT" close CHR-1'
+# A `-r` after the operand makes nothing readonly: the name takes a later
+# assignment, and an `unset` removes it. The default in `${W:-...}` is not
+# read, so that store stays unresolved.
+check_target '/tmp/real' 'W=/tmp/old; declare W=/tmp/new -r 2>/dev/null; W=/tmp/real; bd -C "$W" close CHR-1'
+check_unresolved 'declare W=/tmp/new -r 2>/dev/null; unset W; bd -C "${W:-/tmp/old}" close CHR-1'
+check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; declare BEADS_DIR=/tmp/ext/.beads -r 2>/dev/null; unset BEADS_DIR; cd $STORE; bd close CHR-1"
 # A flag this scan cannot read may be `-p`, or `-f` to `readonly`, as well as
 # `-r`, so whether the names end readonly is unknown, a known `-r` beside it
 # or not.

@@ -4801,10 +4801,20 @@ class Scanner:
             state = True
         elif variant == "local":
             state = False
+        # The options end at the first operand, as bash's own parser ends
+        # them: after it, a word that looks like an option is just another
+        # operand. `declare OUT=/real -p` assigns /real and reports `-p` as
+        # an invalid name; read as the print flag, it kept OUT's old value,
+        # and a `bd -C "$OUT"` after it named a store the write never
+        # opened. An operand is an assignment, a bare name, or any readable
+        # word that does not start with `-` or `+`; a word this scan cannot
+        # read may be either, and is read as below.
         for arg in args:
             if arg.get("Name") or not arg.get("Naked"):
-                continue
+                break
             flag = self.assigned_value(arg.get("Value"))
+            if flag is not UNKNOWN and not flag.startswith(("-", "+")):
+                break
             if flag is not UNKNOWN and flag.startswith("-") and \
                     "f" in flag[1:]:
                 functions = True

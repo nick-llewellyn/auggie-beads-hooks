@@ -2868,6 +2868,9 @@ check_target "$BASE/~:/store" 'HOME=/tmp/home; OUT=~":"/store; bd -C "$OUT" clos
 check_target "$BASE/~/store" 'HOME=/tmp/home; OUT=~"/"store; bd -C "$OUT" close CHR-1'
 check_target "$BASE/~/a" 'HOME=/tmp/home; CS_X=/a; OUT=~$CS_X; bd -C "$OUT" close CHR-1'
 check_target '/x:/tmp/h[1]/two' 'HOME="/tmp/h[1]"; env BEADS_DIR=/x:~/two/.beads bd close CHR-1'
+# A `~user` naming no user is left as written, so a pattern in it is still
+# matched on paths, as bash matches it.
+check_unresolved 'env BEADS_DIR=:~beads-hook-no-such-user*/.beads bd close CHR-1'
 
 # `~user` names that user's home from the passwd database, which HOME cannot
 # override. Handling only `~` and `~/` left it unexpanded -- and an unexpanded

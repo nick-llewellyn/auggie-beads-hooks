@@ -2284,6 +2284,9 @@ class Scanner:
                 home = self.expand_tilde(rest[:end])
                 if home is UNKNOWN:
                     return UNKNOWN
+                # A `~user` naming no user stays as written, pattern and all.
+                if home == rest[:end]:
+                    continue
                 home = re.sub(r"([\\*?\[])", r"\\\1", home)
                 text = text[:pos] + home + rest[end:]
                 pos += len(home)

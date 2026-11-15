@@ -2154,14 +2154,15 @@ class Scanner:
         """
         out = []
         for word in args:
-            fields = self.expand(word)
+            target = self.argument_colons(word)
+            fields = UNKNOWN if target is UNKNOWN else self.expand(target)
             if fields is UNKNOWN:
                 out.append(Field(UNKNOWN,
                                  assign=assignment_name(word, self.raw),
                                  split=may_split(word, self.raw),
                                  dash=may_be_option(word)))
             elif fields:
-                out.append(self.assignment_tilde(word, fields[0]))
+                out.append(self.assignment_tilde(target, fields[0]))
                 out.extend(fields[1:])
         return out
 
@@ -2226,13 +2227,85 @@ class Scanner:
         """
         if word is None:
             return ""
+        word = self.colon_tildes(word)
+        if word is UNKNOWN:
+            return UNKNOWN
         fields = self.expand(word, split=False)
         if fields is UNKNOWN or len(fields) != 1:
             return UNKNOWN
         field = fields[0]
         if not field.tilde:
             return field.value
-        return self.expand_tilde(field.value)
+        # In an assignment the prefix also ends at a `:`: `X=~:~/b` holds
+        # $HOME:$HOME/b.
+        value = field.value
+        end = min([value.find(sep) for sep in "/:" if sep in value] or
+                  [len(value)])
+        prefix = self.expand_tilde(value[:end])
+        return UNKNOWN if prefix is UNKNOWN else prefix + value[end:]
+
+    def colon_tildes(self, word):
+        """`word` with each tilde prefix after an unquoted `:` expanded, or
+        UNKNOWN where one names no directory this scan can read.
+
+        The shell expands an unquoted `~` after each unquoted `:` of an
+        assignment's value, as well as after its `=`, so that a PATH-like list
+        works: `BEADS_DIR=~/one:~/two/.beads` writes $HOME/one:$HOME/two.
+        Read with the first prefix alone, the store named was $HOME/one:~/two,
+        one the write never opened. As for the first, the prefix runs to the
+        next `/` or `:`, and one holding a backslash or running into another
+        part, as `:~$X` does, is left as written. Only an unquoted literal
+        part holds one, so those parts are rewritten, their backslashes
+        doubled for the unescaping `expand` does.
+        """
+        parts = word.get("Parts") or ()
+        out, changed = [], False
+        for index, part in enumerate(parts):
+            text = part.get("Value", "") if part["Type"] == "Lit" else ""
+            pos = 0
+            while ":~" in text[pos:]:
+                at = text.index(":~", pos)
+                lead, pos = text[:at], at + 1
+                if (len(lead) - len(lead.rstrip("\\"))) % 2:
+                    continue
+                rest = text[pos:]
+                end = min([rest.find(sep) for sep in "/:" if sep in rest] or
+                          [len(rest)])
+                if "\\" in rest[:end] or \
+                        end == len(rest) and index < len(parts) - 1:
+                    continue
+                home = self.expand_tilde(rest[:end])
+                if home is UNKNOWN:
+                    return UNKNOWN
+                home = home.replace("\\", "\\\\")
+                text = text[:pos] + home + rest[end:]
+                pos += len(home)
+                changed = True
+            out.append(dict(part, Value=text) if text else part)
+        return dict(word, Parts=out) if changed else word
+
+    def argument_colons(self, word):
+        """`word`, an argument, with its tilde prefixes after an unquoted `:`
+        expanded where it is shaped like an assignment and the shell expands
+        them there, or UNKNOWN; see `colon_tildes` and `assignment_tilde`.
+
+        bash outside POSIX mode expands them, as it does the one after the
+        `=`: `env BEADS_DIR=~/one:~/two/.beads bd close X` writes
+        $HOME/one:$HOME/two. dash, ksh and zsh leave the argument as written.
+        In POSIX mode bash 3.2 still expands them where 5.2 does not, so an
+        argument holding one is unknown there.
+        """
+        parts = word.get("Parts") or ()
+        literal = parts[0].get("Value", "") if parts and \
+            parts[0]["Type"] == "Lit" else ""
+        if not ASSIGN_NAME.match(literal) or self.scope.bash is False:
+            return word
+        expanded = self.colon_tildes(word)
+        if expanded is word:
+            return word
+        if self.scope.bash is UNKNOWN or self.scope.posix is not False:
+            return UNKNOWN
+        return expanded
 
     def prior_value(self, name):
         """The value `name` holds before an append to it, or UNKNOWN.

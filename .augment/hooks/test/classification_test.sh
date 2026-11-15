@@ -1906,6 +1906,18 @@ check_unresolved "cd $STORE; export SHELLOPTS; set -o posix; ENV=/tmp/select-sto
 check_target "$STORE" "cd $STORE; env SHELLOPTS=posix ENV=/tmp/select-store.sh bash --norc -p -i -c 'bd close CHR-1'"
 check_target "$STORE" "cd $STORE; env SHELLOPTS=posix BASH_ENV=/tmp/select-store.sh bash -c 'bd close CHR-1'"
 check_target "$STORE" "cd $STORE; SHELLOPTS=posix ENV=/tmp/select-store.sh bash --norc -i -c 'bd close CHR-1'"
+# Started in POSIX mode by an inherited SHELLOPTS, the shell holds
+# POSIXLY_CORRECT unexported, and in bash 5.2 `set -a; set -o posix` leaves
+# it so: a child that no longer inherits SHELLOPTS starts out of POSIX mode
+# and reads BASH_ENV (#73). Without that start, the `set -o posix` exports
+# it, and the child skips the file.
+set -o posix
+export SHELLOPTS
+check_unresolved "cd $STORE; export -n SHELLOPTS; set -a; set -o posix; BASH_ENV=/tmp/select-store.sh bash -c 'bd close CHR-1'"
+check_unresolved "cd $STORE; export -n SHELLOPTS; BASH_ENV=/tmp/select-store.sh bash -c 'bd close CHR-1'"
+set +o posix
+export -n SHELLOPTS
+check_target "$STORE" "cd $STORE; set -a; set -o posix; BASH_ENV=/tmp/select-store.sh bash -c 'bd close CHR-1'"
 # A wrapper makes it a login shell too, by the name it runs it under: `exec
 # -l`, or `exec -a` or `env -a` with a name opening with `-`. Only the last
 # wrapper names the shell.

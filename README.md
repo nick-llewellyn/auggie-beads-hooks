@@ -136,7 +136,7 @@ retries it. `settings.json` gives the sync hook 60 seconds and the prime hook
 
 Create a repository from this template, with **Use this template** on GitHub
 or `gh repo create <name> --template nick-llewellyn/auggie-beads-hooks`, then
-follow steps 2 to 5 below.
+follow steps 2 to 6 below.
 
 ### Existing project
 
@@ -154,17 +154,18 @@ follow steps 2 to 5 below.
    If the project has no `.augment/settings.json`, copy that file too. If it
    has one, add the three entries from this repository's file to its `hooks`
    object. The commands are relative paths, which Auggie resolves against the
-   workspace root. On Auggie CLI before 1.2.0, change the PostToolUse matcher
-   from `bash` to `launch-process`; see
-   [PostToolUse and SessionEnd](#posttooluse-and-sessionend-beads-syncsh).
+   workspace root.
 
-2. Initialise Beads if the project does not use it yet: `bd init`. Add
+2. On Auggie CLI before 1.2.0, change the PostToolUse matcher in
+   `.augment/settings.json` from `bash` to `launch-process`; see
+   [PostToolUse and SessionEnd](#posttooluse-and-sessionend-beads-syncsh).
+3. Initialise Beads if the project does not use it yet: `bd init`. Add
    `--skip-agents` to leave out the Claude Code, Codex and Cursor files it
    would otherwise generate.
-3. Choose where the store syncs; see the next section.
-4. Ignore the hook's state files; see
+4. Choose where the store syncs; see the next section.
+5. Ignore the hook's state files; see
    [Git ignores](#git-ignores-for-augment-sync-state).
-5. Commit, and check that git recorded the executable bits. This prints
+6. Commit, and check that git recorded the executable bits. This prints
    nothing when they are all set:
 
    ```bash
@@ -194,13 +195,20 @@ them:
    while working in a project's copy, with a test that fails without it.
 2. Run the three suites here, and open the pull request.
 3. Bring each project's copy level with a release, an annotated tag
-   `vX.Y.Z` on `main` listed on the repository's Releases page: replace the
-   copy's `.augment/hooks/` with the one in a checkout of the tag, then
-   restore the lines that differ there for the project's own reasons, such
-   as temporary-file prefixes. A single fix needed before the next release
-   can be applied on its own:
-   `git format-patch -1 <commit> -- .augment/hooks`, then `git apply` in the
-   project.
+   `vX.Y.Z` on `main` listed on the repository's Releases page. Copy the
+   files under `.augment/hooks/` in a checkout of the tag over the copy's,
+   and delete only the upstream files the release dropped, which
+   `git diff --name-status <old-tag> <new-tag> -- .augment/hooks` lists as
+   `D`, `<old-tag>` being the release the copy was last brought level with.
+   Leave the project's own hook files untouched. Then restore the lines that
+   differ for the project's own reasons, such as temporary-file prefixes. A
+   single fix needed before the next release can be applied on its own, from
+   a checkout of this repository:
+
+   ```bash
+   git format-patch -1 --stdout <commit> -- .augment/hooks | git -C /path/to/project apply
+   ```
+
 4. Run the three suites in each copy before pushing, and name the release
    tag in the commit, or the upstream commit for a fix applied on its own.
 5. On every refresh, check that the copy still ignores the hook's state
@@ -410,14 +418,16 @@ and require `Auggie hook tests gate`:
   an option such as `--db=<path>`; a plain `bd` in a directory the event did
   not report; or script run through `eval`.
 - Auggie CLI 1.x events carry the directory a command ran in as a top-level
-  `cwd`, not as `tool_input.cwd`, which the hook reads
-  ([#65](https://github.com/nick-llewellyn/auggie-beads-hooks/issues/65)).
-  Under 1.x, a plain `bd`, with no `-C`, `--db`, `BEADS_DIR` or
-  `BEADS_DB`, therefore runs in a directory the event did not report, and
-  its store is reported in that warning. Each command starts in the workspace
-  root, and a `cd` in one does not carry over to the next, so start the
-  command itself with an absolute `cd`, as in
-  `cd /path/to/project && bd close X-1`.
+  `cwd`, but the hook reads only `tool_input.cwd`
+  ([#65](https://github.com/nick-llewellyn/auggie-beads-hooks/issues/65)),
+  so under 1.x the scan has no directory to start from. A plain `bd`, with
+  no `-C`, `--db`, `BEADS_DIR` or `BEADS_DB`, or a relative `bd -C <dir>`,
+  then cannot be resolved: the hook syncs the workspace roots and warns that
+  a store could not be resolved, without naming it. A store outside the roots
+  that such a call wrote is neither synced nor recorded for SessionEnd. Each
+  command starts in the workspace root, and a `cd` in one does not carry
+  over to the next, so start the command itself with an absolute `cd`, as
+  in `cd /path/to/project && bd close X-1`.
 - Auggie CLI 1.2.0 was seen running shell commands in zsh on macOS, where
   zsh is the default login shell, while the scanner reads every command
   with bash's rules

@@ -4497,13 +4497,16 @@ class Scanner:
         while the body runs, and gives way to the values from before it once
         the body returns, whatever the body assigned to those names:
         `OUT=/decoy; f() { bd -C "$OUT" close X; }; OUT=/ext f` writes /ext,
-        and OUT is /decoy again after it. bash, POSIX-mode bash, dash and zsh
-        agree. An `unset` in the body takes the temporary value away instead,
-        so an assignment after it outlives the call: after `OUT=/old; f() {
-        unset OUT; OUT=/ext; }; OUT=/tmp f`, OUT is /ext in bash. A name the
-        body may have unset is unknown after the call rather than restored,
-        and so is every one after a seal in the body, which may have unset
-        any.
+        and OUT is /decoy again after it. bash outside POSIX mode, dash,
+        busybox ash and zsh agree. In POSIX mode it depends on the shell:
+        bash 3.2 keeps the assignment after the call where bash 5.2 restores
+        it, and ksh keeps it too, so the names are unknown after a call
+        unless the mode was off throughout. An `unset` in the body takes the
+        temporary value away instead, so an assignment after it outlives the
+        call: after `OUT=/old; f() { unset OUT; OUT=/ext; }; OUT=/tmp f`, OUT
+        is /ext in bash. A name the body may have unset is unknown after the
+        call rather than restored, and so is every one after a seal in the
+        body, which may have unset any.
 
         The body is read against the text it was defined in, which its
         offsets index: called from an `eval`, it is not the text being

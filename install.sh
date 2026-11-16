@@ -15,17 +15,37 @@ unset CDPATH
 PREFIX=${AUGGIE_BEADS_HOOKS_PREFIX:-${XDG_DATA_HOME:-$HOME/.local/share}/auggie-beads-hooks}
 SOURCE=${AUGGIE_BEADS_HOOKS_SOURCE:-https://github.com/nick-llewellyn/auggie-beads-hooks.git}
 SETTINGS=$HOME/.augment/settings.json
-# A hook command that runs one of these scripts: the script's own name, at the
-# start or after a `/`, a quote, whitespace or a separator, quoted or not,
-# ending the command or followed by its arguments, a redirection or a
-# separator. `/x/custom-beads-sync.sh` is someone else's hook, and in
-# `x>beads-sync.sh` the name is a redirect target.
-HOOK_RE="(^|[/'\"\\s;&|(])beads-(prime|sync)\\.sh['\"]?(\\s|\$|[;&|)<>])"
-# The jq test for a hook that runs one: in its command or, where the command
-# is a program run with `args`, in those. An event's entry holds its hooks in
-# a `hooks` list, or is one hook itself.
-OURS_JQ='def ours: ((.command // "") | test($re))
-  or any((.args // [])[] | strings; test($re));
+# jq regexes for a hook command. It runs one of these scripts where the
+# script's name, with or without a path and quoted or not, is a command: at
+# the start, after a newline, `;`, `&`, `|` or `(` outside quotes, or after
+# bash, sh, zsh, dash, env, exec, command or nohup and their options (for
+# command, only -p, since -v and -V look the name up). After a shell's -c,
+# the script must start the command string. A space or tab only separates
+# arguments, so in `echo /old/beads-sync.sh` the script is only mentioned,
+# which MENTION_RE finds. `/x/custom-beads-sync.sh` is someone else's hook,
+# and in `x>beads-sync.sh` the name is a redirect target.
+_re_part='(?:[^\s;&|()<>"\x27\\]|\\.|"[^"]*"|\x27[^\x27]*\x27)'
+_re_dir="(?:$_re_part*/)?"
+_re_b='[ \t]+'
+_re_name='beads-(?:prime|sync)\.sh'
+_re_start='^(?:(?:[^"\x27\\]|\\.|"(?:[^"\\]|\\.)*"|\x27[^\x27]*\x27)*(?:[\n;(]|(?<![<>])[&|]))?[ \t]*'
+_re_shell="${_re_dir}(?:bash|sh|zsh|dash)(?:$_re_b(?:[-+][oO]$_re_b$_re_part+|--[A-Za-z-]+|[-+][A-Za-bd-z]+))*"
+_re_wrap="(?:$_re_shell|${_re_dir}env(?:$_re_b(?:-[uCS]$_re_b$_re_part+|-$_re_part*|[A-Za-z_][A-Za-z0-9_]*=$_re_part*))*"
+_re_wrap+="|${_re_dir}exec(?:$_re_b(?:-a$_re_b$_re_part+|-$_re_part*))*|${_re_dir}command(?:$_re_b(?:-p|--))*"
+_re_wrap+="|${_re_dir}nohup(?:$_re_b-$_re_part*)*)"
+HOOK_RE="$_re_start(?:$_re_wrap$_re_b)*(?:$_re_shell$_re_b-[A-Za-z]*c[A-Za-z]*$_re_b[\"\\x27]?[ \\t]*$_re_dir$_re_name"
+HOOK_RE+="|$_re_dir(?:$_re_name|\"(?:[^\"]*/)?$_re_name\"|\\x27(?:[^\\x27]*/)?$_re_name\\x27))"
+HOOK_RE+="(?=[\"\\x27]?(?:\\s|\$|[;&|)<>]))"
+MENTION_RE="(^|[/'\"\\s;&|(])beads-(prime|sync)\\.sh['\"]?(\\s|\$|[;&|)<>])"
+# The jq test for a hook that runs one. A program run with `args` is read as
+# the command line they make, so an argument counts only where it would
+# there, as after bash. An event's entry holds its hooks in a `hooks` list,
+# or is one hook itself.
+OURS_JQ='def line: (.command // "") + ((.args // []) | map(tostring
+    | if test("^[A-Za-z0-9_./+=:@%,-]+$") then " " + .
+      else " \u0027" + gsub("\u0027"; "\u0027\\\u0027\u0027") + "\u0027" end) | add // "");
+def ours: line | test($re);
+def shown: (.command // "") + ((.args // []) | map(" " + tostring) | add // "");
 def hooks_of: if type != "object" then empty
   elif (.hooks | type) == "array" then .hooks[] | objects
   else . end;'
@@ -173,7 +193,8 @@ hook_command() {
 # Rewrites the settings file: every user-level hook that runs a beads-prime.sh
 # or beads-sync.sh is dropped, under any event and whichever install it names,
 # and with --wire the three for this one are added. Everything else in the
-# file is kept, and the old file is left beside it as settings.json.bak.
+# file is kept, hooks that only mention one included, and the old file is
+# left beside it as settings.json.bak.
 write_settings() {
   local wire=$1 prime=${2:-} sync=${3:-} dir tmp
   need jq
@@ -216,6 +237,24 @@ write_settings() {
   echo "updated $SETTINGS"
 }
 
+# Lists the hooks that name one of these scripts without running it, which
+# --wire and --unwire leave in place.
+mentions() {
+  local found
+  [ -e "$SETTINGS" ] || return 0
+  found=$(jq -r --arg re "$HOOK_RE" --arg mre "$MENTION_RE" "$OURS_JQ"'
+    def mentions: (ours | not) and (((.command // "") | test($mre))
+      or any((.args // [])[] | strings; test($mre)));
+    (.hooks // {}) | to_entries[] | .key as $event | .value | arrays | .[]
+    | hooks_of | select(mentions) | "mentioned: \($event): \(shown)"' \
+    "$SETTINGS" 2>/dev/null) || die "could not read the hooks in $SETTINGS"
+  [ -n "$found" ] || return 0
+  printf '%s\n' "$found"
+  echo "Hooks marked mentioned name beads-prime.sh or beads-sync.sh but do" \
+    "not run them, as far as this can tell, so --wire and --unwire leave" \
+    "them in place. Remove any that runs these hooks by hand."
+}
+
 wire() {
   need python3
   [ -d "$PREFIX" ] && PREFIX=$(cd "$PREFIX" && pwd -P)
@@ -227,6 +266,7 @@ wire() {
   prime=$(hook_command "$hooks/beads-prime.sh")
   sync=$(hook_command "$hooks/beads-sync.sh")
   write_settings true "$prime" "$sync"
+  mentions
   echo "Remove any other wiring of these hooks, such as a project's" \
     ".augment/settings.json entries: Auggie runs every matching hook, so" \
     "two wirings run the hooks twice."
@@ -252,9 +292,10 @@ status() {
       die "$SETTINGS is not a JSON object; fix it and run again"
     entry=$(jq -r --arg re "$HOOK_RE" "$OURS_JQ"'(.hooks // {}) | to_entries[]
       | .key as $event | .value | arrays | .[] | hooks_of | select(ours)
-      | "wired: \($event): \(.command // "")" + ((.args // []) | map(" " + tostring) | add // "")' \
+      | "wired: \($event): \(shown)"' \
       "$SETTINGS" 2>/dev/null) || die "could not read the wiring in $SETTINGS"
     [ -n "$entry" ] && printf '%s\n' "$entry" || echo "wired: none ($SETTINGS)"
+    mentions
   else
     echo "wired: none ($SETTINGS)"
   fi
@@ -267,6 +308,7 @@ if [ "$WIRE" -eq 1 ]; then
   wire
 elif [ "$UNWIRE" -eq 1 ]; then
   write_settings false
+  mentions
 elif [ "$STATUS" -eq 1 ]; then
   status
 fi

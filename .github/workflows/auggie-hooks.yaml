@@ -113,9 +113,10 @@ jobs:
       # look-alike and stale entries, including ones with a redirection or run
       # through args, fails --status on settings it cannot read, cleans legacy
       # entries under every event, after a separator and without a hooks list,
-      # recognises a redirection straight after the name and a bare name after
-      # whitespace or a separator, and checks the README's list of supplied
-      # files. /bin/bash, as below.
+      # recognises a script where it runs, with a redirection straight after
+      # it, after a separator or after a shell or other wrapper, lists and
+      # keeps hooks that only mention one, and checks the README's list of
+      # supplied files. /bin/bash, as below.
       - name: Check the installer
         run: |
           set -euo pipefail
@@ -323,35 +324,64 @@ jobs:
           run3 --unwire >/dev/null
           [ "$(cmds | sort | tr '\n' ' ')" = "/x/bare-foreign.sh /x/stop.sh " ] ||
             fail "unwire left: $(jq -c . "$T/s3.json")"
-          # A redirection straight after the name, or a bare name after whitespace or a
-          # separator, runs these; a longer name or a redirect target does not.
-          others='["/x/custom-beads-sync.sh", "/a/beads-sync.sh.bak", "/a/beads-sync.sh2>/dev/null", "x>beads-sync.sh"]'
-          jq -n --argjson others "$others" --arg quoted "'/old/beads-sync.sh'>/dev/null" '{hooks: {PostToolUse: ([
-            "/old/beads-sync.sh>/dev/null", "/old/beads-sync.sh>>/tmp/log",
-            "/old/beads-sync.sh</dev/null", "/old/beads-sync.sh>|/tmp/log", $quoted,
-            "true;beads-sync.sh", "true&&beads-sync.sh", "true|beads-sync.sh", "(beads-sync.sh)",
-            "true\tbeads-sync.sh", "true\nbeads-sync.sh",
-            "/old/beads-sync.sh&>/dev/null", "/old/beads-sync.sh 2>&1"] + $others
-            | map({matcher: "bash", hooks: [{type: "command", command: .}]}))}}' >"$T/s4.json"
+          # A script runs where it is a command: at the start, after a newline or a
+          # separator, or after a shell, env, exec, command or nohup and their options,
+          # with a redirection straight after it or not. Named anywhere else, it is a
+          # mention, which every option lists and leaves in place. A longer name or a
+          # redirect target is neither.
+          looks='["/x/custom-beads-sync.sh", "/a/beads-sync.sh.bak", "/a/beads-sync.sh2>/dev/null", "x>beads-sync.sh"]'
+          jq -n --argjson looks "$looks" --arg quoted "'/old/beads-sync.sh'>/dev/null" \
+            --arg printf "printf '%s\n' /old/beads-sync.sh" '
+            def hook: {type: "command", command: .};
+            {hooks: {PostToolUse: ([
+              "/old/beads-sync.sh>/dev/null", "/old/beads-sync.sh>>/tmp/log",
+              "/old/beads-sync.sh</dev/null", "/old/beads-sync.sh>|/tmp/log", $quoted,
+              "true;beads-sync.sh", "true&&beads-sync.sh", "true|beads-sync.sh", "(beads-sync.sh)",
+              "true\nbeads-sync.sh", "true\n/old/beads-sync.sh", "true; /old/beads-sync.sh",
+              "/old/beads-sync.sh&>/dev/null", "/old/beads-sync.sh 2>&1", "\"$HOME\"/old/beads-sync.sh",
+              "bash -e /old/beads-sync.sh", "bash -o pipefail /old/beads-sync.sh",
+              "bash -c \"/old/beads-sync.sh\"", "/bin/sh /old/beads-sync.sh",
+              "zsh -f /old/beads-sync.sh", "dash -e /old/beads-sync.sh",
+              "env FOO=1 /old/beads-sync.sh", "/usr/bin/env -u HOME FOO=1 bash -e /old/beads-sync.sh",
+              "exec /old/beads-sync.sh", "exec -a name /old/beads-sync.sh",
+              "command /old/beads-sync.sh", "command -p /old/beads-sync.sh", "nohup /old/beads-sync.sh"]
+              | map({matcher: "bash", hooks: [hook]})),
+            Stop: (($looks | map(hook)) + ([
+              "true\tbeads-sync.sh", "true beads-sync.sh", $printf, "echo /old/beads-sync.sh",
+              "command -v /old/beads-sync.sh", "bash -c \"echo /old/beads-sync.sh\"",
+              "echo \"x;/old/beads-sync.sh\""] | map(hook))
+              + [{type: "command", command: "echo", args: ["/old/beads-sync.sh"]}]
+              | map({hooks: [.]}))}}' >"$T/s4.json"
           run4() { /bin/bash ./install.sh --prefix "$P" --settings "$T/s4.json" "$@"; }
           ours4() { jq '[.hooks[][].hooks[].command | select(test("current/.augment/hooks/beads-"))] | length' "$T/s4.json"; }
-          others4() {
-            jq --argjson others "$others" '[.hooks[][].hooks[].command
-              | select(test("current/.augment/hooks/beads-") | not)] | sort == ($others | sort)' "$T/s4.json"
+          stop=$(jq -c .hooks.Stop "$T/s4.json")
+          n=$(jq '.hooks.PostToolUse | length' "$T/s4.json")
+          m=$(($(jq '.hooks.Stop | length' "$T/s4.json") - 4))
+          mentioned() {
+            [ "$(grep -c '^mentioned: Stop: ' "$T/out")" = "$m" ] &&
+              grep -qF "mentioned: Stop: true$(printf '\t')beads-sync.sh" "$T/out" &&
+              grep -qF 'mentioned: Stop: echo /old/beads-sync.sh' "$T/out" &&
+              grep -q 'Remove any that runs these hooks by hand' "$T/out" ||
+              fail "$1 did not list the $m entries that only mention these: $(cat "$T/out")"
           }
           run4 --status >"$T/out"
           grep -qF 'wired: PostToolUse: /old/beads-sync.sh>/dev/null' "$T/out" &&
             grep -qF 'wired: PostToolUse: /old/beads-sync.sh</dev/null' "$T/out" ||
             fail "status missed an entry with a redirection straight after the name"
-          [ "$(grep -c '^wired: ' "$T/out")" = 13 ] ||
-            fail "status did not list the 13 entries that run these: $(cat "$T/out")"
+          [ "$(grep -c '^wired: ' "$T/out")" = "$n" ] ||
+            fail "status did not list the $n entries that run these: $(cat "$T/out")"
+          mentioned status
           ! grep -q -e custom-beads -e '\.bak' -e 'sh2>' -e 'x>beads' "$T/out" ||
             fail "status listed a look-alike: $(cat "$T/out")"
-          run4 --wire >/dev/null
-          [ "$(others4)" = true ] && [ "$(ours4)" = 3 ] ||
+          run4 --wire >"$T/out"
+          [ "$(jq -c .hooks.Stop "$T/s4.json")" = "$stop" ] && [ "$(ours4)" = 3 ] &&
+            [ "$(jq '.hooks.PostToolUse | length' "$T/s4.json")" = 1 ] ||
             fail "rewiring did not replace exactly the entries that run these: $(jq -c . "$T/s4.json")"
-          run4 --unwire >/dev/null
-          [ "$(others4)" = true ] && [ "$(ours4)" = 0 ] || fail "unwire left: $(jq -c . "$T/s4.json")"
+          mentioned --wire
+          run4 --unwire >"$T/out"
+          [ "$(jq -c '.hooks | keys' "$T/s4.json")" = '["Stop"]' ] && [ "$(jq -c .hooks.Stop "$T/s4.json")" = "$stop" ] ||
+            fail "unwire left: $(jq -c . "$T/s4.json")"
+          mentioned --unwire
           # The README lists exactly the files a project holding a copy deletes.
           diff <(sed -n 's/^ *\(\.augment\/hooks\/[^ ]*\)$/\1/p' README.md | sort) \
             <(git ls-files .augment/hooks | sort) >/dev/null ||

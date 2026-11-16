@@ -1789,6 +1789,14 @@ class Scanner:
                            posix="posix" in opts or
                            "POSIXLY_CORRECT" in os.environ or
                            "POSIX_PEDANTIC" in os.environ)
+        # Started in POSIX mode by SHELLOPTS or POSIX_PEDANTIC, bash sets
+        # POSIXLY_CORRECT to `y`, unexported, as a child does; see `sub_scan`.
+        # Read as unset, a later `set -a; set -o posix` exported it, and a
+        # `bash -c` child that bash 5.2 starts out of POSIX mode, reading its
+        # BASH_ENV, was read as skipping that file.
+        if self.scope.posix and "POSIXLY_CORRECT" not in os.environ:
+            self.scope.assigns["POSIXLY_CORRECT"] = "y"
+            self.scope.exported["POSIXLY_CORRECT"] = False
         self.depth = 0
         # The functions defined so far, by name, each with a tuple of the
         # bodies it may have and the text each was parsed from; see

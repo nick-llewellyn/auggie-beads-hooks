@@ -3330,6 +3330,12 @@ check_target '/tmp/real' 'EMPTY=; OUT=/tmp/old; declare "$EMPTY" -p OUT=/tmp/rea
 check_target '/tmp/old' 'OPT=" -x"; OUT=/tmp/old; declare $OPT -p OUT=/tmp/real >/dev/null; bd -C "$OUT" close CHR-1'
 check_target '/tmp/real' 'OPT="-x -r"; OUT=/tmp/old; declare $OPT OUT=/tmp/real; bd -C "$OUT" close CHR-1'
 check_unresolved 'OUT=/tmp/old; declare * -p OUT=/tmp/real >/dev/null 2>&1; bd -C "$OUT" close CHR-1'
+# A lone `-` or `+` ends the options as `--` does, in every declaration
+# builtin, so an option-like word after it is an operand.
+check_target '/tmp/real' 'OPT=" - -p"; OUT=/tmp/old; declare $OPT OUT=/tmp/real 2>/dev/null; bd -C "$OUT" close CHR-1'
+check_target '/tmp/real' 'OPT=" + -p"; OUT=/tmp/old; declare $OPT OUT=/tmp/real 2>/dev/null; bd -C "$OUT" close CHR-1'
+check_target '/tmp/real' 'OUT=/tmp/old; typeset - -p OUT=/tmp/real 2>/dev/null; bd -C "$OUT" close CHR-1'
+check_target '/tmp/ext' "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; export - -n BEADS_DIR 2>/dev/null; cd $STORE; bd close CHR-1"
 # A `-r` after the operand makes nothing readonly: the name takes a later
 # assignment, and an `unset` removes it. The default in `${W:-...}` is not
 # read, so that store stays unresolved.
@@ -3347,6 +3353,9 @@ check_unresolved "unset BEADS_DB; BEADS_DIR=/tmp/ext/.beads; readonly \"\$CS_OPT
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; declare -r +r BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; typeset +r -r BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
 check_target "$STORE" "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; declare \"\$CS_OPTS\" +r BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
+# An unread word that may split can give `-r` and the first operand, making a
+# later `+r` an operand, so the name may stay readonly and set.
+check_unresolved "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; OPT=\$(printf '%s' '-r W'); declare \$OPT +r BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
 check_target '/tmp/ext' "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; readonly BEADS_DIR; declare -r +r BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
 check_target '/tmp/ext' "unset BEADS_DB; export BEADS_DIR=/tmp/ext/.beads; readonly +r BEADS_DIR; unset BEADS_DIR; cd $STORE; bd close CHR-1"
 # A readonly name refuses an assignment and keeps its value, and bash carries

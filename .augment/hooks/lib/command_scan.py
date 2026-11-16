@@ -4816,7 +4816,7 @@ class Scanner:
         # word after it may be an operand: what such a word asks for is in
         # doubt, and so is every assignment the command makes, as `declare *
         # -p OUT=/real` assigns where `*` matches no option.
-        doubt = late_cancel = False
+        doubt = late_cancel = split = False
         for arg in args:
             if arg.get("Name") or not arg.get("Naked"):
                 break
@@ -4833,8 +4833,11 @@ class Scanner:
                     # `unset` removes it.
                     state = UNKNOWN
                     unread = doubt = True
+                    split = split or may_split(arg.get("Value"), self.raw)
                     continue
-                if not flag.startswith(("-", "+")) or flag == "--":
+                # A lone `-` or `+` ends the options as `--` does: `declare -
+                # -p OUT=/real` assigns /real.
+                if not flag.startswith(("-", "+")) or flag in ("--", "-", "+"):
                     ended = True
                     break
                 letters = flag[1:]
@@ -4864,11 +4867,13 @@ class Scanner:
         # unread flag's with it: `declare -r +r BEADS_DIR` leaves it
         # writable. A mark set earlier stays, below; `readonly +r` marks.
         # After an unread word a `+r` may be an operand, so a known `-r`
-        # before it is in doubt.
+        # before it is in doubt, and so is one the word may give itself
+        # where it may split: `$OPT` holding `-r W` gives `-r` and an
+        # operand, and the `+r` after it is another operand.
         if cancelled:
             readonly = False
         elif late_cancel:
-            readonly = UNKNOWN if readonly else False
+            readonly = UNKNOWN if readonly or split else False
         elif unread and variant != "export":
             readonly = UNKNOWN
         conditional = conditional or doubt

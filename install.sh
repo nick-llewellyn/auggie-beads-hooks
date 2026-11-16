@@ -80,7 +80,9 @@ done
 
 # The release a directory holds, if it has the hooks this script wires: both
 # entry points executable, every shell script parsing, and the scanner
-# compiling, checked without writing bytecode into the release.
+# compiling, checked without writing bytecode into the release. Its own
+# install.sh, which updating and rolling back from it run, must be executable
+# and parse too, where it has one; releases before v0.2.0 have none.
 check_release() {
   local hooks=$1/.augment/hooks f
   [ -x "$hooks/beads-prime.sh" ] && [ -x "$hooks/beads-sync.sh" ] || return 1
@@ -90,6 +92,9 @@ check_release() {
   done
   python3 -c 'import sys; compile(open(sys.argv[1], "rb").read(), sys.argv[1], "exec")' \
     "$hooks/lib/command_scan.py" 2>/dev/null || return 1
+  if [ -e "$1/install.sh" ]; then
+    [ -x "$1/install.sh" ] && bash -n "$1/install.sh" 2>/dev/null || return 1
+  fi
 }
 
 # Points PREFIX/current at $1 in one rename, so a hook starting meanwhile finds

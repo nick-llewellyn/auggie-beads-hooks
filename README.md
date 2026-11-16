@@ -217,7 +217,9 @@ of the new one:
 
 It installs the release beside the others and moves `current`, so the wiring
 needs no change. Installing a release that is already installed only moves
-`current`, which is how to roll back. Delete a release no longer needed with
+`current`, which is how to roll back. Releases before `v0.2.0` have no
+`install.sh`, so after rolling back to one, update from a clone of the
+repository. Delete a release no longer needed with
 `rm -rf ~/.local/share/auggie-beads-hooks/<tag>`. Each release's notes say
 whether it needs anything beyond installing; see [Versioning](#versioning).
 

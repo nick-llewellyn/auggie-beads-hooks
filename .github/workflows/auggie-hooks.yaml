@@ -105,7 +105,8 @@ jobs:
 
       # Installs this checkout under two temporary tags into a prefix holding a
       # space, rolls back, refuses bad tags, a release whose scanner does not
-      # compile and a prefix holding a quote, keeps a running hook on its own
+      # compile or whose install.sh is unusable, and a prefix holding a quote,
+      # installs a release with no install.sh, keeps a running hook on its own
       # release when current moves, installs and wires a relative prefix under
       # an exported CDPATH, refuses an install whose destination appears
       # meanwhile, wires a scratch settings file beside other hooks, a
@@ -149,6 +150,35 @@ jobs:
             fail "a release whose scanner does not compile must be refused"
           [ ! -e "$P/v0.0.3-ci" ] || fail "a refused release was left installed"
           [ "$(readlink "$P/current")" = v0.0.1-ci ] || fail "a refused release moved current"
+          # A release whose own install.sh is not executable, or does not parse, is
+          # refused before current moves; one with no install.sh, as before v0.2.0, still
+          # installs.
+          base=$(G rev-parse v0.0.4-ci^)
+          G checkout -q "$base"
+          chmod -x "$T/src/install.sh"
+          G commit -qam installer-not-executable
+          G tag v0.0.6-ci
+          chmod +x "$T/src/install.sh"
+          { head -n 1 "$T/src/install.sh"; echo 'if then'; tail -n +2 "$T/src/install.sh"; } >"$T/install.new"
+          mv "$T/install.new" "$T/src/install.sh"
+          chmod +x "$T/src/install.sh"
+          G commit -qam installer-syntax-error
+          G tag v0.0.8-ci
+          for t in v0.0.6-ci v0.0.8-ci; do
+            ! /bin/bash ./install.sh --prefix "$P" --source "file://$T/src" "$t" 2>/dev/null ||
+              fail "a release whose install.sh is not usable must be refused ($t)"
+            [ ! -e "$P/$t" ] || fail "a refused release was left installed ($t)"
+            [ "$(readlink "$P/current")" = v0.0.1-ci ] || fail "a refused release moved current ($t)"
+          done
+          G checkout -q "$base"
+          G rm -q install.sh
+          G commit -qm no-installer
+          G tag v0.0.7-ci
+          /bin/bash ./install.sh --prefix "$P" --source "file://$T/src" v0.0.7-ci >/dev/null ||
+            fail "a release with no install.sh must still install"
+          [ "$(readlink "$P/current")" = v0.0.7-ci ] && [ ! -e "$P/current/install.sh" ] ||
+            fail "a release with no install.sh did not become current"
+          run v0.0.1-ci >/dev/null
           # A hook run keeps the release it started in when current moves meanwhile:
           # the stub jq moves current to a release whose command-scan.sh leaves a mark.
           /bin/bash ./install.sh --prefix "$P" --source "file://$T/src" v0.0.4-ci >/dev/null

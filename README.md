@@ -229,7 +229,21 @@ project to the installed release:
 
 1. Install and wire a release as above.
 2. In one change to the project:
-   - delete `.augment/hooks/`;
+   - delete the files this repository supplies, which are the same in every
+     version, and remove any directory that leaves empty:
+
+     ```text
+     .augment/hooks/beads-prime.sh
+     .augment/hooks/beads-sync.sh
+     .augment/hooks/lib/command-scan.sh
+     .augment/hooks/lib/command_scan.py
+     .augment/hooks/test/classification_test.sh
+     .augment/hooks/test/lock_test.sh
+     .augment/hooks/test/prime_test.sh
+     ```
+
+     Any other file under `.augment/hooks/` is the project's own: keep it,
+     and its wiring;
    - remove the three hook entries from `.augment/settings.json`, or from
      `.augment/settings.local.json`, and the file if nothing else is left in
      it;

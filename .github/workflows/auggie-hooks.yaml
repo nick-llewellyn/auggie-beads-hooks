@@ -104,8 +104,10 @@ jobs:
           exit "$rc"
 
       # Installs this checkout under two temporary tags into a prefix holding a
-      # space, rolls back, refuses bad tags, and wires a scratch settings file
-      # beside other hooks and a stale entry. /bin/bash, as below.
+      # space, rolls back, refuses bad tags and a prefix holding a quote, wires
+      # a scratch settings file beside other hooks, a look-alike and stale
+      # entries, and checks the README's list of supplied files. /bin/bash, as
+      # below.
       - name: Check the installer
         run: |
           set -euo pipefail
@@ -134,15 +136,21 @@ jobs:
           # Wiring replaces any earlier entries for these hooks and keeps the rest.
           jq -n '{model: "m", hooks: {
             PostToolUse: [{matcher: "edit", hooks: [{type: "command", command: "/x/fmt.sh"}]},
-                          {matcher: "launch-process", hooks: [{type: "command", command: "/old/beads-sync.sh"}]}],
+                          {matcher: "launch-process", hooks: [{type: "command", command: "/old/beads-sync.sh"}]},
+                          {matcher: "bash", hooks: [{type: "command", command: "\"/old hooks/beads-sync.sh\""}]}],
+            SessionEnd: [{hooks: [{type: "command", command: "/x/custom-beads-sync.sh"}]}],
             Stop: [{hooks: [{type: "command", command: "/x/stop.sh"}]}]}}' >"$S"
+          # Status and wiring know these hooks by their exact names, quoted or not.
+          run --status >"$T/out"
+          grep -qF 'wired: PostToolUse: "/old hooks/beads-sync.sh"' "$T/out" || fail "status missed a double-quoted entry"
+          ! grep -q custom-beads-sync "$T/out" || fail "status counted another hook as these"
           run --wire >/dev/null
           [ -e "$S.bak" ] || fail "no backup kept"
           H="'$(cd "$P" && pwd -P)/current/.augment/hooks"
           jq -e --arg p "$H/beads-prime.sh'" --arg s "$H/beads-sync.sh'" '
             .model == "m"
             and ([.hooks.SessionStart[].hooks[].command] == [$p])
-            and ([.hooks.SessionEnd[].hooks[].command] == [$s])
+            and ([.hooks.SessionEnd[].hooks[].command] == ["/x/custom-beads-sync.sh", $s])
             and ([.hooks.PostToolUse[] | {m: .matcher, c: .hooks[].command}]
                  == [{m: "edit", c: "/x/fmt.sh"}, {m: "bash", c: $s}])
             and ([.hooks.Stop[].hooks[].command] == ["/x/stop.sh"])' "$S" >/dev/null ||
@@ -154,17 +162,28 @@ jobs:
           mkdir -p "$T/ws"
           cmd=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$S")
           AUGMENT_PROJECT_DIR="$T/ws" sh -c "$cmd" </dev/null || fail "the wired prime command did not run"
-          cmd=$(jq -r '.hooks.SessionEnd[0].hooks[0].command' "$S")
+          cmd=$(jq -r '.hooks.SessionEnd[-1].hooks[0].command' "$S")
           jq -n --arg w "$T/ws" '{hook_event_name: "SessionEnd", workspace_roots: [$w]}' |
             sh -c "$cmd" || fail "the wired sync command did not run"
           run --status >"$T/out"; grep -q 'wired: SessionEnd' "$T/out" || fail "status does not show the wiring"
+          # A prefix the shell cannot be handed is refused before the settings change.
+          Q="$T/it's"
+          /bin/bash ./install.sh --prefix "$Q" --source "file://$PWD" v0.0.1-ci >/dev/null
+          cp "$S" "$T/before"
+          ! /bin/bash ./install.sh --prefix "$Q" --settings "$S" --wire 2>/dev/null ||
+            fail "a prefix holding a single quote must be refused"
+          cmp -s "$S" "$T/before" || fail "a refused wiring changed the settings"
           # Unwiring removes only these entries, and the hooks key once it is empty.
           run --unwire >/dev/null
-          jq -e '([.hooks[][].hooks[].command] | sort) == ["/x/fmt.sh", "/x/stop.sh"]' "$S" >/dev/null ||
+          jq -e '([.hooks[][].hooks[].command] | sort) == ["/x/custom-beads-sync.sh", "/x/fmt.sh", "/x/stop.sh"]' "$S" >/dev/null ||
             fail "unwire left: $(jq -c . "$S")"
           echo '{"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": "/a/beads-sync.sh"}]}]}}' >"$S"
           run --unwire >/dev/null
           [ "$(jq -c . "$S")" = '{}' ] || fail "an emptied hooks key must go: $(jq -c . "$S")"
+          # The README lists exactly the files a project holding a copy deletes.
+          diff <(sed -n 's/^ *\(\.augment\/hooks\/[^ ]*\)$/\1/p' README.md | sort) \
+            <(git ls-files .augment/hooks | sort) >/dev/null ||
+            fail "README's list of the files this repository supplies is out of date"
           echo "installer check: ok"
 
       # /bin/bash rather than bash: on macOS it is 3.2. The suites run the

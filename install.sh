@@ -12,6 +12,10 @@ set -euo pipefail
 PREFIX=${AUGGIE_BEADS_HOOKS_PREFIX:-${XDG_DATA_HOME:-$HOME/.local/share}/auggie-beads-hooks}
 SOURCE=${AUGGIE_BEADS_HOOKS_SOURCE:-https://github.com/nick-llewellyn/auggie-beads-hooks.git}
 SETTINGS=$HOME/.augment/settings.json
+# A hook command that runs one of these scripts: the script's own name, at the
+# start or after a `/`, a quote or a space, ending the command, quoted or not.
+# `/x/custom-beads-sync.sh` is someone else's hook.
+HOOK_RE="(^|[/'\" ])beads-(prime|sync)\\.sh['\"]?\$"
 
 usage() {
   cat <<'EOF'
@@ -154,8 +158,9 @@ write_settings() {
   fi
   tmp=$(mktemp "$dir/.settings.XXXXXX")
   if ! { [ -e "$SETTINGS" ] && cat "$SETTINGS" || echo '{}'; } |
-    jq --argjson wire "$wire" --arg prime "$prime" --arg sync "$sync" '
-      def ours: (.command // "") | test("beads-(prime|sync)\\.sh'"'"'?$");
+    jq --argjson wire "$wire" --arg prime "$prime" --arg sync "$sync" \
+      --arg re "$HOOK_RE" '
+      def ours: (.command // "") | test($re);
       def keep(entries): (entries // [])
         | map(.hooks = ((.hooks // []) | map(select(ours | not))))
         | map(select(.hooks != []));
@@ -185,9 +190,12 @@ wire() {
   [ -d "$PREFIX" ] && PREFIX=$(cd "$PREFIX" && pwd -P)
   [ -L "$PREFIX/current" ] && check_release "$PREFIX/current" ||
     die "no release is installed in $PREFIX; run install.sh TAG first"
-  local hooks=$PREFIX/current/.augment/hooks
-  write_settings true "$(hook_command "$hooks/beads-prime.sh")" \
-    "$(hook_command "$hooks/beads-sync.sh")"
+  local hooks=$PREFIX/current/.augment/hooks prime sync
+  # Assigned on their own, so a path hook_command refuses stops the script
+  # here, before the settings file is touched.
+  prime=$(hook_command "$hooks/beads-prime.sh")
+  sync=$(hook_command "$hooks/beads-sync.sh")
+  write_settings true "$prime" "$sync"
   echo "Remove any other wiring of these hooks, such as a project's" \
     ".augment/settings.json entries: Auggie runs every matching hook, so" \
     "two wirings run the hooks twice."
@@ -206,9 +214,8 @@ status() {
     done
   fi
   if [ -e "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
-    jq -r '(.hooks // {}) | to_entries[] | .key as $event | .value[]
-      | (.hooks // [])[] | (.command // "")
-      | select(test("beads-(prime|sync)\\.sh'"'"'?$"))
+    jq -r --arg re "$HOOK_RE" '(.hooks // {}) | to_entries[] | .key as $event
+      | .value[] | (.hooks // [])[] | (.command // "") | select(test($re))
       | "wired: \($event): \(.)"' "$SETTINGS" 2>/dev/null |
       grep . || echo "wired: none ($SETTINGS)"
   else

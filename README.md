@@ -75,8 +75,8 @@ missing or the workspace has no `.beads/`.
 ### PostToolUse and SessionEnd: `beads-sync.sh`
 
 The hook reads the event as JSON on stdin: `hook_event_name`,
-`workspace_roots`, `tool_name`, `tool_input.command`, `tool_input.cwd` and
-`tool_input.wait`.
+`workspace_roots`, `tool_name`, `tool_input.command`, `tool_input.cwd` (or,
+from Auggie CLI 1.x, the top-level `cwd`) and `tool_input.wait`.
 
 On **PostToolUse** for the shell tool, it scans the command. Any `bd` call
 not known to be read-only counts as a write. The scanner also works out which
@@ -424,17 +424,6 @@ and require `Auggie hook tests gate`:
   known only at run time before `--`, as in `bd close "$ID"`, which may be
   an option such as `--db=<path>`; a plain `bd` in a directory the event did
   not report; or script run through `eval`.
-- Auggie CLI 1.x events carry the directory a command ran in as a top-level
-  `cwd`, but the hook reads only `tool_input.cwd`
-  ([#65](https://github.com/nick-llewellyn/auggie-beads-hooks/issues/65)),
-  so under 1.x the scan has no directory to start from. A plain `bd`, with
-  no `-C`, `--db`, `BEADS_DIR` or `BEADS_DB`, or a relative `bd -C <dir>`,
-  then cannot be resolved: the hook syncs the workspace roots and warns that
-  a store could not be resolved, without naming it. A store outside the roots
-  that such a call wrote is neither synced nor recorded for SessionEnd. Each
-  command starts in the workspace root, and a `cd` in one does not carry
-  over to the next, so start the command itself with an absolute `cd`, as
-  in `cd /path/to/project && bd close X-1`.
 - Auggie CLI 1.2.0 was seen running shell commands in zsh on macOS, where
   zsh is the default login shell, while the scanner reads every command
   with bash's rules

@@ -117,12 +117,14 @@ teardown() {
 # field is optional on the real event. `$CONV` sets the `conversation_id`,
 # which is left out when empty. `$FIRE_WAIT`, `true` or `false`, sets the
 # launch's `wait`, which is left out when empty. `$FIRE_TOOL` sets the
-# `tool_name`, `launch-process` by default.
+# `tool_name`, `launch-process` by default. `$FIRE_TOP_CWD` sets the event's
+# top-level `cwd`, where Auggie 1.x carries the directory, left out when empty.
 event_as() {
   local e="$1" c="$2"; shift 2
   jq -n --arg e "$e" --arg w "$WS" --arg c "$c" --arg n "${FIRE_TOOL:-launch-process}" \
-    --arg d "${FIRE_CWD:-}" --arg v "${CONV:-}" --arg t "${FIRE_WAIT:-}" --args \
-    '{hook_event_name:$e, workspace_roots:([$w] + $ARGS.positional), tool_name:$n, tool_input:({command:$c} + (if $d == "" then {} else {cwd:$d} end) + (if $t == "" then {} else {wait:($t == "true")} end))} + (if $v == "" then {} else {conversation_id:$v} end)' \
+    --arg d "${FIRE_CWD:-}" --arg v "${CONV:-}" --arg t "${FIRE_WAIT:-}" \
+    --arg tc "${FIRE_TOP_CWD:-}" --args \
+    '{hook_event_name:$e, workspace_roots:([$w] + $ARGS.positional), tool_name:$n, tool_input:({command:$c} + (if $d == "" then {} else {cwd:$d} end) + (if $t == "" then {} else {wait:($t == "true")} end))} + (if $v == "" then {} else {conversation_id:$v} end) + (if $tc == "" then {} else {cwd:$tc} end)' \
     "$@"
 }
 
@@ -1534,6 +1536,38 @@ fire_in "$BASE" 'bd -C store close CHR-1'
 grep -qF "push $BASE/store" "$BD_LOG.dirs" && report ok ||
   report bad "a relative -C must resolve against the launch cwd (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
 rm -rf "$BASE"
+teardown
+
+# --- an Auggie 1.x event's top-level cwd is the launch cwd ------------
+# 1.x carries the directory as the event's top-level `cwd`, with none in
+# `tool_input` (#65). A plain `bd` there writes the store it walks up to, and
+# a relative `-C` resolves against it, with no unresolved-store warning.
+# Where both are present, `tool_input.cwd` is the one that counts.
+setup
+BASE=$(mktemp -d)
+mkdir -p "$BASE/.beads" "$BASE/store/.beads"
+FIRE_TOOL=bash FIRE_TOP_CWD="$BASE" event 'bd close CHR-1' |
+  "$BASH_UNDER_TEST" "$HOOK" >"$WS/out" 2>&1
+grep -qxF "push $BASE" "$BD_LOG.dirs" && report ok ||
+  report bad "a 1.x plain bd must sync the store under the top-level cwd (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
+! grep -q "could not be resolved" "$WS/out" && report ok ||
+  report bad "a 1.x plain bd must not be reported unresolved (out: $(tr '\n' ',' <"$WS/out"))"
+FIRE_TOOL=bash FIRE_TOP_CWD="$BASE" fire 'bd -C store close CHR-1'
+grep -qxF "push $BASE/store" "$BD_LOG.dirs" && report ok ||
+  report bad "a 1.x relative -C must resolve against the top-level cwd (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
+rm -rf "$BASE"
+teardown
+
+setup
+BASE=$(mktemp -d)
+ELSE=$(mktemp -d)
+mkdir -p "$BASE/store/.beads" "$ELSE/store/.beads"
+FIRE_TOP_CWD="$ELSE" fire_in "$BASE" 'bd -C store close CHR-1'
+grep -qF "push $BASE/store" "$BD_LOG.dirs" && report ok ||
+  report bad "tool_input.cwd must win over the top-level cwd (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
+! grep -qF "push $ELSE/store" "$BD_LOG.dirs" && report ok ||
+  report bad "the top-level cwd must not be used beside tool_input.cwd (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
+rm -rf "$BASE" "$ELSE"
 teardown
 
 # --- a cd before the bd moves the base ---------------------------------

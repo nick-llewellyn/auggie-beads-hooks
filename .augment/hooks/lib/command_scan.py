@@ -4801,47 +4801,82 @@ class Scanner:
             state = True
         elif variant == "local":
             state = False
+        # The options end at the first operand, as bash's own parser ends
+        # them: after it, a word that looks like an option is just another
+        # operand. `declare OUT=/real -p` assigns /real and reports `-p` as
+        # an invalid name; read as the print flag, it kept OUT's old value,
+        # and a `bd -C "$OUT"` after it named a store the write never
+        # opened. An operand is an assignment, a bare name, or any readable
+        # field that does not start with `-` or `+`. A word's fields are
+        # read in turn, as the builtin is handed them: `OPT=' -x'; declare
+        # $OPT -p OUT=/real` passes `-x` and `-p` and only prints, and a word
+        # that expands to no field, as an unquoted `$EMPTY` does, hands it
+        # none, where a quoted `"$EMPTY"` is an operand. A word this scan
+        # cannot expand may be flags or the first operand, so a flag-like
+        # word after it may be an operand: what such a word asks for is in
+        # doubt, and so is every assignment the command makes, as `declare *
+        # -p OUT=/real` assigns where `*` matches no option.
+        doubt = late_cancel = split = False
         for arg in args:
             if arg.get("Name") or not arg.get("Naked"):
-                continue
-            flag = self.assigned_value(arg.get("Value"))
-            if flag is not UNKNOWN and flag.startswith("-") and \
-                    "f" in flag[1:]:
-                functions = True
-            if flag is not UNKNOWN and flag.startswith("-") and \
-                    "p" in flag[1:]:
-                printing = True
-            if flag is UNKNOWN:
-                # A flag this scan cannot read may be `-x`, `-n`, `-r`, `-p`
-                # or `-f`, so what the builtin did to the attributes is
-                # unknown, a known `-r` beside it or not: after `declare -r
-                # "$OPT" BEADS_DIR`, OPT holding `-p`, an `unset` removes it.
-                state = UNKNOWN
-                unread = True
-            elif flag == "--":
                 break
-            elif variant == "export" and flag.startswith("-") and \
-                    "n" in flag[1:]:
-                state = False
-            elif variant != "export" and flag.startswith("-") and \
-                    "x" in flag[1:]:
-                state = True
-            elif variant != "export" and flag.startswith("+") and \
-                    "x" in flag[1:]:
-                state = False
-            if flag is not UNKNOWN and flag.startswith("-") and \
-                    "r" in flag[1:] and variant != "export":
-                readonly = True
-            if flag is not UNKNOWN and flag.startswith("+") and \
-                    "r" in flag[1:] and variant not in ("export", "readonly"):
-                cancelled = True
+            fields = self.expand(arg.get("Value"))
+            flags = [UNKNOWN] if fields is UNKNOWN else \
+                [field.value for field in fields]
+            ended = False
+            for flag in flags:
+                if flag is UNKNOWN:
+                    # A flag this scan cannot read may be `-x`, `-n`, `-r`,
+                    # `-p` or `-f`, so what the builtin did to the attributes
+                    # is unknown, a known `-r` beside it or not: after
+                    # `declare -r "$OPT" BEADS_DIR`, OPT holding `-p`, an
+                    # `unset` removes it.
+                    state = UNKNOWN
+                    unread = doubt = True
+                    split = split or may_split(arg.get("Value"), self.raw)
+                    continue
+                # A lone `-` or `+` ends the options as `--` does: `declare -
+                # -p OUT=/real` assigns /real.
+                if not flag.startswith(("-", "+")) or flag in ("--", "-", "+"):
+                    ended = True
+                    break
+                letters = flag[1:]
+                if flag.startswith("+") and "r" in letters and \
+                        variant not in ("export", "readonly"):
+                    if doubt:
+                        late_cancel = True
+                    else:
+                        cancelled = True
+                if doubt:
+                    continue
+                if flag.startswith("-") and "f" in letters:
+                    functions = True
+                if flag.startswith("-") and "p" in letters:
+                    printing = True
+                if variant == "export" and flag.startswith("-") and \
+                        "n" in letters:
+                    state = False
+                elif variant != "export" and "x" in letters:
+                    state = flag.startswith("-")
+                if flag.startswith("-") and "r" in letters and \
+                        variant != "export":
+                    readonly = True
+            if ended:
+                break
         # `+r` takes the command's own `-r` away, wherever it stands, and an
         # unread flag's with it: `declare -r +r BEADS_DIR` leaves it
         # writable. A mark set earlier stays, below; `readonly +r` marks.
+        # After an unread word a `+r` may be an operand, so a known `-r`
+        # before it is in doubt, and so is one the word may give itself
+        # where it may split: `$OPT` holding `-r W` gives `-r` and an
+        # operand, and the `+r` after it is another operand.
         if cancelled:
             readonly = False
+        elif late_cancel:
+            readonly = UNKNOWN if readonly or split else False
         elif unread and variant != "export":
             readonly = UNKNOWN
+        conditional = conditional or doubt
         if functions:
             return
         # `declare -p` and `typeset -p` print the names and change nothing,

@@ -31,8 +31,10 @@ SETTINGS=$HOME/.augment/settings.json
 # `/x/custom-beads-sync.sh` is someone else's hook, and in
 # `x>beads-sync.sh` the name is a redirect target. Still counted, though
 # they do not run the script: a function body that is never called, as in
-# `f() (/old/beads-sync.sh)`, and a `case` pattern. Telling those apart
-# would need a shell parser.
+# `f() (/old/beads-sync.sh)`, a `case` pattern, as in `a|beads-sync.sh)`,
+# and code after `exit`, `exec` or `return` in the same command, as in
+# `exit 0; /old/beads-sync.sh`. Telling those apart would need a shell
+# parser that follows control flow, which this does not attempt.
 _re_part='(?:[^\s;&|()<>"\x27\\]|\\.|"[^"]*"|\x27[^\x27]*\x27)'
 _re_dir="(?![A-Za-z_][A-Za-z0-9_]*\\+?=|#)(?:$_re_part*/)?"
 _re_b='[ \t]+'
@@ -57,7 +59,7 @@ _re_wrap+="|${_re_dir}nohup(?:$_re_b-$_re_part*)*)"
 HOOK_RE="$_re_start(?:$_re_wrap$_re_b)*(?:$_re_shell$_re_b-[A-Za-mo-z]*c[A-Za-mo-z]*$_re_b[\"\\x27]?[ \\t]*$_re_dir$_re_name"
 HOOK_RE+="|$_re_stdin|$_re_script)"
 HOOK_RE+="(?=[\"\\x27]?(?:\\s|\$|[;&|)<>]))"
-MENTION_RE="(^|[/'\"\\s;&|(])beads-(prime|sync)\\.sh['\"]?(\\s|\$|[;&|)<>])"
+MENTION_RE="(^|[/'\"\\s;&|(])beads-(prime|sync)\\.sh['\"]?(\\s|\$|[;&|)<>\`])"
 # The jq test for a hook that runs one. A program run with `args` is read as
 # the command line they make, so an argument counts only where it would
 # there, as after bash. An event's entry holds its hooks in a `hooks` list,

@@ -332,8 +332,9 @@ jobs:
           # mention, which every option lists and leaves in place: as an assignment's
           # value, in a comment or a heredoc, after a separator inside $'...', after a
           # shell that runs no script or runs its stdin (-s), as --rcfile's file, or
-          # fed to a shell that runs another script. A longer name or a redirect
-          # target is neither.
+          # fed to a shell that runs another script. A backtick substitution, which
+          # runs it, is not recognised as running it, but is listed as a mention. A
+          # longer name or a redirect target is neither.
           looks='["/x/custom-beads-sync.sh", "/a/beads-sync.sh.bak", "/a/beads-sync.sh2>/dev/null", "x>beads-sync.sh"]'
           jq -n --argjson looks "$looks" --arg quoted "'/old/beads-sync.sh'>/dev/null" \
             --arg printf "printf '%s\n' /old/beads-sync.sh" --arg ansi "echo \$'it\\'s;/old/beads-sync.sh'" \
@@ -371,7 +372,7 @@ jobs:
               "bash -s /old/beads-sync.sh </x/custom.sh", "bash -s -- /old/beads-sync.sh",
               "bash --rcfile /old/beads-sync.sh", "bash --init-file /old/beads-sync.sh",
               "bash /x/other.sh </old/beads-sync.sh", "bash </old/beads-sync.sh /x/other.sh",
-              "bash -c /x/other.sh </old/beads-sync.sh"] | map(hook))
+              "bash -c /x/other.sh </old/beads-sync.sh", "`/old/beads-sync.sh`"] | map(hook))
               + [{type: "command", command: "echo", args: ["/old/beads-sync.sh"]}]
               | map({hooks: [.]}))}}' >"$T/s4.json"
           run4() { /bin/bash ./install.sh --prefix "$P" --settings "$T/s4.json" "$@"; }

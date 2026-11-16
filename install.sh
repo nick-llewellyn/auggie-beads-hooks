@@ -16,10 +16,11 @@ PREFIX=${AUGGIE_BEADS_HOOKS_PREFIX:-${XDG_DATA_HOME:-$HOME/.local/share}/auggie-
 SOURCE=${AUGGIE_BEADS_HOOKS_SOURCE:-https://github.com/nick-llewellyn/auggie-beads-hooks.git}
 SETTINGS=$HOME/.augment/settings.json
 # A hook command that runs one of these scripts: the script's own name, at the
-# start or after a `/`, a quote or a space, quoted or not, ending the command
-# or followed by its arguments, a redirection or a separator.
-# `/x/custom-beads-sync.sh` is someone else's hook.
-HOOK_RE="(^|[/'\" ])beads-(prime|sync)\\.sh['\"]?(\\s|\$|[;&|)])"
+# start or after a `/`, a quote, whitespace or a separator, quoted or not,
+# ending the command or followed by its arguments, a redirection or a
+# separator. `/x/custom-beads-sync.sh` is someone else's hook, and in
+# `x>beads-sync.sh` the name is a redirect target.
+HOOK_RE="(^|[/'\"\\s;&|(])beads-(prime|sync)\\.sh['\"]?(\\s|\$|[;&|)<>])"
 # The jq test for a hook that runs one: in its command or, where the command
 # is a program run with `args`, in those. An event's entry holds its hooks in
 # a `hooks` list, or is one hook itself.

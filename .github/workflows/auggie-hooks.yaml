@@ -110,8 +110,9 @@ jobs:
       # release when current moves, installs and wires a relative prefix under
       # an exported CDPATH, refuses an install whose destination appears
       # meanwhile, wires a scratch settings file beside other hooks, a
-      # look-alike and stale entries, and checks the README's list of supplied
-      # files. /bin/bash, as below.
+      # look-alike and stale entries, including ones with a redirection or run
+      # through args, fails --status on settings it cannot read, and checks the
+      # README's list of supplied files. /bin/bash, as below.
       - name: Check the installer
         run: |
           set -euo pipefail
@@ -236,13 +237,17 @@ jobs:
           jq -n '{model: "m", hooks: {
             PostToolUse: [{matcher: "edit", hooks: [{type: "command", command: "/x/fmt.sh"}]},
                           {matcher: "launch-process", hooks: [{type: "command", command: "/old/beads-sync.sh"}]},
-                          {matcher: "bash", hooks: [{type: "command", command: "\"/old hooks/beads-sync.sh\""}]}],
-            SessionEnd: [{hooks: [{type: "command", command: "/x/custom-beads-sync.sh"}]}],
+                          {matcher: "bash", hooks: [{type: "command", command: "\"/old hooks/beads-sync.sh\""}]},
+                          {matcher: "bash", hooks: [{type: "command", command: "/old/beads-sync.sh 2>/dev/null"}]}],
+            SessionEnd: [{hooks: [{type: "command", command: "/x/custom-beads-sync.sh"}]},
+                         {hooks: [{type: "command", command: "bash", args: ["/old/beads-sync.sh"]}]}],
             Stop: [{hooks: [{type: "command", command: "/x/stop.sh"}]}]}}' >"$S"
           # Status and wiring know these hooks by their exact names, quoted or not.
           run --status >"$T/out"
           grep -qF 'wired: PostToolUse: "/old hooks/beads-sync.sh"' "$T/out" || fail "status missed a double-quoted entry"
           ! grep -q custom-beads-sync "$T/out" || fail "status counted another hook as these"
+          grep -qF 'wired: PostToolUse: /old/beads-sync.sh 2>/dev/null' "$T/out" || fail "status missed an entry with a redirection"
+          grep -qF 'wired: SessionEnd: bash /old/beads-sync.sh' "$T/out" || fail "status missed an entry run through args"
           run --wire >/dev/null
           [ -e "$S.bak" ] || fail "no backup kept"
           H="'$(cd "$P" && pwd -P)/current/.augment/hooks"
@@ -265,6 +270,16 @@ jobs:
           jq -n --arg w "$T/ws" '{hook_event_name: "SessionEnd", workspace_roots: [$w]}' |
             sh -c "$cmd" || fail "the wired sync command did not run"
           run --status >"$T/out"; grep -q 'wired: SessionEnd' "$T/out" || fail "status does not show the wiring"
+          # A settings file --status cannot read is reported, not taken for no wiring.
+          printf '{"hooks": ' >"$T/bad.json"
+          ! /bin/bash ./install.sh --prefix "$P" --settings "$T/bad.json" --status >"$T/out" 2>&1 ||
+            fail "status must fail on a settings file that is not JSON"
+          ! grep -q 'wired: none' "$T/out" || fail "status reported no wiring for a file it could not read"
+          mkdir -p "$T/nojq"
+          for t in readlink grep; do ln -s "$(command -v "$t")" "$T/nojq/$t"; done
+          ! PATH="$T/nojq" /bin/bash ./install.sh --prefix "$P" --settings "$S" --status >"$T/out" 2>&1 ||
+            fail "status must fail without jq"
+          ! grep -q 'wired: none' "$T/out" || fail "status reported no wiring without jq"
           # A prefix the shell cannot be handed is refused before the settings change.
           Q="$T/it's"
           /bin/bash ./install.sh --prefix "$Q" --source "file://$PWD" v0.0.1-ci >/dev/null

@@ -16,9 +16,14 @@ PREFIX=${AUGGIE_BEADS_HOOKS_PREFIX:-${XDG_DATA_HOME:-$HOME/.local/share}/auggie-
 SOURCE=${AUGGIE_BEADS_HOOKS_SOURCE:-https://github.com/nick-llewellyn/auggie-beads-hooks.git}
 SETTINGS=$HOME/.augment/settings.json
 # A hook command that runs one of these scripts: the script's own name, at the
-# start or after a `/`, a quote or a space, ending the command, quoted or not.
+# start or after a `/`, a quote or a space, quoted or not, ending the command
+# or followed by its arguments or a redirection.
 # `/x/custom-beads-sync.sh` is someone else's hook.
-HOOK_RE="(^|[/'\" ])beads-(prime|sync)\\.sh['\"]?\$"
+HOOK_RE="(^|[/'\" ])beads-(prime|sync)\\.sh['\"]?(\\s|\$)"
+# The jq test for a hook entry that runs one: in its command or, where the
+# command is a program run with `args`, in those.
+OURS_JQ='def ours: ((.command // "") | test($re))
+  or any((.args // [])[] | strings; test($re));'
 
 usage() {
   cat <<'EOF'
@@ -176,8 +181,7 @@ write_settings() {
   tmp=$(mktemp "$dir/.settings.XXXXXX")
   if ! { [ -e "$SETTINGS" ] && cat "$SETTINGS" || echo '{}'; } |
     jq --argjson wire "$wire" --arg prime "$prime" --arg sync "$sync" \
-      --arg re "$HOOK_RE" '
-      def ours: (.command // "") | test($re);
+      --arg re "$HOOK_RE" "$OURS_JQ"'
       def keep(entries): (entries // [])
         | map(.hooks = ((.hooks // []) | map(select(ours | not))))
         | map(select(.hooks != []));
@@ -231,11 +235,17 @@ status() {
       [ -d "$entry" ] && [ ! -L "$entry" ] && echo "installed: ${entry##*/}"
     done
   fi
-  if [ -e "$SETTINGS" ] && command -v jq >/dev/null 2>&1; then
-    jq -r --arg re "$HOOK_RE" '(.hooks // {}) | to_entries[] | .key as $event
-      | .value[] | (.hooks // [])[] | (.command // "") | select(test($re))
-      | "wired: \($event): \(.)"' "$SETTINGS" 2>/dev/null |
-      grep . || echo "wired: none ($SETTINGS)"
+  # A file this cannot read is reported as such, not taken for one with no
+  # wiring in it.
+  if [ -e "$SETTINGS" ]; then
+    need jq
+    jq -e 'type == "object"' "$SETTINGS" >/dev/null 2>&1 ||
+      die "$SETTINGS is not a JSON object; fix it and run again"
+    entry=$(jq -r --arg re "$HOOK_RE" "$OURS_JQ"'(.hooks // {}) | to_entries[]
+      | .key as $event | .value[] | (.hooks // [])[] | select(ours)
+      | "wired: \($event): \(.command // "")" + ((.args // []) | map(" " + tostring) | add // "")' \
+      "$SETTINGS" 2>/dev/null) || die "could not read the wiring in $SETTINGS"
+    [ -n "$entry" ] && printf '%s\n' "$entry" || echo "wired: none ($SETTINGS)"
   else
     echo "wired: none ($SETTINGS)"
   fi

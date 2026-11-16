@@ -11,6 +11,12 @@
 
 set -uo pipefail
 
+# The directory this script runs from, its link resolved once, first: when
+# it is reached through a link that an update moves, as an installed
+# release's `current` is, every helper it loads later comes from the
+# release this run started in.
+HOOK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)
+
 EVENT_JSON=$(cat)
 
 # No `bd` means no bead store to sync, so exiting quietly is honest here.
@@ -1006,7 +1012,6 @@ commit_noop() {
 # the bead store. Deciding which commands those are means reading shell
 # syntax, which is what the scanner does; see its header for why that is a
 # tokeniser and not a set of patterns.
-HOOK_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=lib/command-scan.sh
 . "$HOOK_DIR/lib/command-scan.sh"
 

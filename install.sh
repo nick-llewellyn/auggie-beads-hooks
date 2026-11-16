@@ -76,7 +76,8 @@ done
 [ -z "$TAG" ] || [ $((UNWIRE + STATUS)) -eq 0 ] || die "a tag goes with --wire only"
 
 # The release a directory holds, if it has the hooks this script wires: both
-# entry points executable, and every shell script parsing.
+# entry points executable, every shell script parsing, and the scanner
+# compiling, checked without writing bytecode into the release.
 check_release() {
   local hooks=$1/.augment/hooks f
   [ -x "$hooks/beads-prime.sh" ] && [ -x "$hooks/beads-sync.sh" ] || return 1
@@ -84,6 +85,8 @@ check_release() {
   for f in "$hooks"/*.sh "$hooks"/lib/*.sh; do
     bash -n "$f" 2>/dev/null || return 1
   done
+  python3 -c 'import sys; compile(open(sys.argv[1], "rb").read(), sys.argv[1], "exec")' \
+    "$hooks/lib/command_scan.py" 2>/dev/null || return 1
 }
 
 # Points PREFIX/current at $1 in one rename, so a hook starting meanwhile finds
@@ -123,7 +126,8 @@ install_release() {
       die "could not fetch the tag $TAG from $SOURCE"
     git -C "$TMP/$TAG" -c advice.detachedHead=false checkout -q --detach "$TAG" ||
       die "could not check out $TAG"
-    check_release "$TMP/$TAG" || die "$TAG does not hold the hooks this script installs"
+    check_release "$TMP/$TAG" ||
+      die "$TAG fails the release check: an entry point is missing or not executable, or a script does not parse"
     mv "$TMP/$TAG" "$dest"
     rm -rf "$TMP"
     trap - EXIT
@@ -187,6 +191,7 @@ write_settings() {
 }
 
 wire() {
+  need python3
   [ -d "$PREFIX" ] && PREFIX=$(cd "$PREFIX" && pwd -P)
   [ -L "$PREFIX/current" ] && check_release "$PREFIX/current" ||
     die "no release is installed in $PREFIX; run install.sh TAG first"

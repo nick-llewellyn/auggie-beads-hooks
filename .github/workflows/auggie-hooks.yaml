@@ -114,10 +114,10 @@ jobs:
       # through args, fails --status on settings it cannot read, cleans legacy
       # entries under every event, after a separator and without a hooks list,
       # recognises a script where it runs, with a redirection straight after
-      # it, after a separator, assignments or a shell or other wrapper, lists
-      # and keeps hooks that only mention one, in comments, heredocs and
-      # assignments among them, and checks the README's list of supplied
-      # files. /bin/bash, as below.
+      # it, after a separator, assignments or a shell or other wrapper, or fed
+      # to a shell's stdin, lists and keeps hooks that only mention one, in
+      # comments, heredocs, assignments and after a shell's -s among them, and
+      # checks the README's list of supplied files. /bin/bash, as below.
       - name: Check the installer
         run: |
           set -euo pipefail
@@ -327,11 +327,13 @@ jobs:
             fail "unwire left: $(jq -c . "$T/s3.json")"
           # A script runs where it is a command: at the start, after a newline or a
           # separator, after assignments, or after a shell, env, exec, command or nohup
-          # and their options, with a redirection straight after it or not. Named
-          # anywhere else, it is a mention, which every option lists and leaves in
-          # place: as an assignment's value, in a comment or a heredoc, after a
-          # separator inside $'...', or after a shell that runs no script. A longer
-          # name or a redirect target is neither.
+          # and their options, with a redirection straight after it or not, or fed by
+          # < to a shell with no script word and no -c. Named anywhere else, it is a
+          # mention, which every option lists and leaves in place: as an assignment's
+          # value, in a comment or a heredoc, after a separator inside $'...', after a
+          # shell that runs no script or runs its stdin (-s), as --rcfile's file, or
+          # fed to a shell that runs another script. A longer name or a redirect
+          # target is neither.
           looks='["/x/custom-beads-sync.sh", "/a/beads-sync.sh.bak", "/a/beads-sync.sh2>/dev/null", "x>beads-sync.sh"]'
           jq -n --argjson looks "$looks" --arg quoted "'/old/beads-sync.sh'>/dev/null" \
             --arg printf "printf '%s\n' /old/beads-sync.sh" --arg ansi "echo \$'it\\'s;/old/beads-sync.sh'" \
@@ -351,7 +353,10 @@ jobs:
               "command /old/beads-sync.sh", "command -p /old/beads-sync.sh", "nohup /old/beads-sync.sh",
               "X=1 /old/beads-sync.sh", "X=1 Y+=2 bash -e /old/beads-sync.sh", "bash --norc /old/beads-sync.sh",
               "# note\n/old/beads-sync.sh", "echo a#b; /old/beads-sync.sh",
-              "cat <<<x >/dev/null; /old/beads-sync.sh", $ansi2, "false && /old/beads-sync.sh"]
+              "cat <<<x >/dev/null; /old/beads-sync.sh", $ansi2, "false && /old/beads-sync.sh",
+              "bash -sc /old/beads-sync.sh", "bash -i /old/beads-sync.sh", "bash -O extglob /old/beads-sync.sh",
+              "bash --rcfile /dev/null /old/beads-sync.sh", "bash </old/beads-sync.sh",
+              "bash -s </old/beads-sync.sh", "bash </old/beads-sync.sh 2>/dev/null"]
               | map({matcher: "bash", hooks: [hook]})),
             Stop: (($looks | map(hook)) + ([
               "true\tbeads-sync.sh", "true beads-sync.sh", $printf, "echo /old/beads-sync.sh",
@@ -360,7 +365,13 @@ jobs:
               "X=/old/beads-sync.sh", "X=/old/beads-sync.sh true", "env X=/old/beads-sync.sh true",
               "true # see ; /old/beads-sync.sh", "cat >/dev/null <<EOF\n/old/beads-sync.sh\nEOF", $ansi,
               "bash -n /old/beads-sync.sh", "sh -n /old/beads-sync.sh", "bash -o noexec /old/beads-sync.sh",
-              "bash --help /old/beads-sync.sh", "bash --version /old/beads-sync.sh"] | map(hook))
+              "bash --help /old/beads-sync.sh", "bash --version /old/beads-sync.sh",
+              "bash -s /old/beads-sync.sh", "sh -s /old/beads-sync.sh", "zsh -s /old/beads-sync.sh",
+              "dash -s /old/beads-sync.sh", "bash -es /old/beads-sync.sh",
+              "bash -s /old/beads-sync.sh </x/custom.sh", "bash -s -- /old/beads-sync.sh",
+              "bash --rcfile /old/beads-sync.sh", "bash --init-file /old/beads-sync.sh",
+              "bash /x/other.sh </old/beads-sync.sh", "bash </old/beads-sync.sh /x/other.sh",
+              "bash -c /x/other.sh </old/beads-sync.sh"] | map(hook))
               + [{type: "command", command: "echo", args: ["/old/beads-sync.sh"]}]
               | map({hooks: [.]}))}}' >"$T/s4.json"
           run4() { /bin/bash ./install.sh --prefix "$P" --settings "$T/s4.json" "$@"; }

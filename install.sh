@@ -20,9 +20,12 @@ SETTINGS=$HOME/.augment/settings.json
 # the start, after a newline, `;`, `&`, `|` or `(` outside quotes and
 # comments and before any heredoc's `<<`, after `NAME=value` assignments, or
 # after bash, sh, zsh, dash, env, exec, command or nohup and their options.
-# A shell given -n, -o noexec, --help or --version runs no script, and
-# command's -v and -V only look the name up, so those do not count. After a
-# shell's -c, the script must start the command string. A space or tab only
+# A shell with no script word and no -c also runs what a `<` feeds it, when
+# only output redirections follow. A shell given -n, -o noexec, --help or
+# --version runs no script, one given -s runs its stdin, so a word after it
+# is an argument, --rcfile and --init-file take a file, and command's -v and
+# -V only look the name up, so those do not count. After a shell's -c, the
+# script must start the command string. A space or tab only
 # separates arguments, so in `echo /old/beads-sync.sh` the script is only
 # mentioned, which MENTION_RE finds, as it is in `X=/old/beads-sync.sh`.
 # `/x/custom-beads-sync.sh` is someone else's hook, and in
@@ -39,14 +42,20 @@ _re_text='(?:[^"\x27\\#<$]|\\.|"(?:[^"\\]|\\.)*"|\$\x27(?:[^\x27\\]|\\.)*\x27|\$
 _re_text+='|<<<|<(?!<)|(?<=[^\s;&|()<>])#|(?<![^\s;&|()<>])(?>#[^\n]*))*'
 _re_start="^(?:$_re_text(?:[\\n;(]|(?<![<>])[&|]))?[ \\t]*(?:$_re_assign$_re_b)*"
 _re_noexec='(?i:no[_-]?exec)'
-_re_shell="${_re_dir}(?:bash|sh|zsh|dash)(?:$_re_b(?:[-+]O$_re_b$_re_part+|\\+o$_re_b$_re_part+"
-_re_shell+="|-o$_re_b(?!$_re_noexec[ \\t])$_re_part+|--(?!(?:help|version|$_re_noexec)(?![A-Za-z-]))[A-Za-z-]+"
-_re_shell+="|[-+][A-Za-bd-mo-z]+))*"
+_re_shopt="[-+]O$_re_b$_re_part+|\\+o$_re_b$_re_part+|-o$_re_b(?!$_re_noexec[ \\t])$_re_part+"
+_re_shopt+="|--(?:rcfile|init-file)$_re_b$_re_part+"
+_re_shopt+="|--(?!(?:help|version|rcfile|init-file|$_re_noexec)(?![A-Za-z-]))[A-Za-z-]+"
+_re_sh="${_re_dir}(?:bash|sh|zsh|dash)"
+_re_shell="$_re_sh(?:$_re_b(?:$_re_shopt|[-+][A-Za-bd-mo-rt-z]+))*"
+_re_script="$_re_dir(?:$_re_name|\"(?:[^\"]*/)?$_re_name\"|\\x27(?:[^\\x27]*/)?$_re_name\\x27)"
+_re_out='(?:>>|>\||>&|>|&>>|&>)'
+_re_stdin="$_re_sh(?:$_re_b(?:$_re_shopt|[-+][A-Za-bd-mo-z]+))*[ \\t]*0?<[ \\t]*$_re_script"
+_re_stdin+="(?=(?:(?:[ \\t]*|$_re_b[1-9])$_re_out[ \\t]*$_re_part+)*[ \\t]*(?:\$|[\\n;&|)]))"
 _re_wrap="(?:$_re_shell|${_re_dir}env(?:$_re_b(?:-[uCS]$_re_b$_re_part+|-$_re_part*|[A-Za-z_][A-Za-z0-9_]*=$_re_part*))*"
 _re_wrap+="|${_re_dir}exec(?:$_re_b(?:-a$_re_b$_re_part+|-$_re_part*))*|${_re_dir}command(?:$_re_b(?:-p|--))*"
 _re_wrap+="|${_re_dir}nohup(?:$_re_b-$_re_part*)*)"
 HOOK_RE="$_re_start(?:$_re_wrap$_re_b)*(?:$_re_shell$_re_b-[A-Za-mo-z]*c[A-Za-mo-z]*$_re_b[\"\\x27]?[ \\t]*$_re_dir$_re_name"
-HOOK_RE+="|$_re_dir(?:$_re_name|\"(?:[^\"]*/)?$_re_name\"|\\x27(?:[^\\x27]*/)?$_re_name\\x27))"
+HOOK_RE+="|$_re_stdin|$_re_script)"
 HOOK_RE+="(?=[\"\\x27]?(?:\\s|\$|[;&|)<>]))"
 MENTION_RE="(^|[/'\"\\s;&|(])beads-(prime|sync)\\.sh['\"]?(\\s|\$|[;&|)<>])"
 # The jq test for a hook that runs one. A program run with `args` is read as

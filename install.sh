@@ -17,13 +17,17 @@ SOURCE=${AUGGIE_BEADS_HOOKS_SOURCE:-https://github.com/nick-llewellyn/auggie-bea
 SETTINGS=$HOME/.augment/settings.json
 # A hook command that runs one of these scripts: the script's own name, at the
 # start or after a `/`, a quote or a space, quoted or not, ending the command
-# or followed by its arguments or a redirection.
+# or followed by its arguments, a redirection or a separator.
 # `/x/custom-beads-sync.sh` is someone else's hook.
-HOOK_RE="(^|[/'\" ])beads-(prime|sync)\\.sh['\"]?(\\s|\$)"
-# The jq test for a hook entry that runs one: in its command or, where the
-# command is a program run with `args`, in those.
+HOOK_RE="(^|[/'\" ])beads-(prime|sync)\\.sh['\"]?(\\s|\$|[;&|)])"
+# The jq test for a hook that runs one: in its command or, where the command
+# is a program run with `args`, in those. An event's entry holds its hooks in
+# a `hooks` list, or is one hook itself.
 OURS_JQ='def ours: ((.command // "") | test($re))
-  or any((.args // [])[] | strings; test($re));'
+  or any((.args // [])[] | strings; test($re));
+def hooks_of: if type != "object" then empty
+  elif (.hooks | type) == "array" then .hooks[] | objects
+  else . end;'
 
 usage() {
   cat <<'EOF'
@@ -165,10 +169,10 @@ hook_command() {
   esac
 }
 
-# Rewrites the settings file: every user-level entry that runs a beads-prime.sh
-# or beads-sync.sh is dropped, whichever install it names, and with --wire the
-# three for this one are added. Everything else in the file is kept, and the
-# old file is left beside it as settings.json.bak.
+# Rewrites the settings file: every user-level hook that runs a beads-prime.sh
+# or beads-sync.sh is dropped, under any event and whichever install it names,
+# and with --wire the three for this one are added. Everything else in the
+# file is kept, and the old file is left beside it as settings.json.bak.
 write_settings() {
   local wire=$1 prime=${2:-} sync=${3:-} dir tmp
   need jq
@@ -182,16 +186,20 @@ write_settings() {
   if ! { [ -e "$SETTINGS" ] && cat "$SETTINGS" || echo '{}'; } |
     jq --argjson wire "$wire" --arg prime "$prime" --arg sync "$sync" \
       --arg re "$HOOK_RE" "$OURS_JQ"'
-      def keep(entries): (entries // [])
-        | map(.hooks = ((.hooks // []) | map(select(ours | not))))
-        | map(select(.hooks != []));
+      def clean: if type != "object" then .
+        elif (.hooks | type) == "array"
+        then .hooks |= map(select(type != "object" or (ours | not)))
+        elif ours then empty else . end;
+      def keep: if type == "array" then map(clean)
+        | map(select(type != "object" or (.hooks | type) != "array"
+            or .hooks != [])) else . end;
       def hook(cmd; ms): {type: "command", command: cmd, timeout: ms};
-      .hooks = ((.hooks // {})
-        | .SessionStart = keep(.SessionStart)
+      .hooks = ((.hooks // {}) | map_values(keep)
+        | .SessionStart = (.SessionStart // [])
             + (if $wire then [{hooks: [hook($prime; 15000)]}] else [] end)
-        | .PostToolUse = keep(.PostToolUse)
+        | .PostToolUse = (.PostToolUse // [])
             + (if $wire then [{matcher: "bash", hooks: [hook($sync; 60000)]}] else [] end)
-        | .SessionEnd = keep(.SessionEnd)
+        | .SessionEnd = (.SessionEnd // [])
             + (if $wire then [{hooks: [hook($sync; 60000)]}] else [] end)
         | with_entries(select(.value != [])))
       | if .hooks == {} then del(.hooks) else . end
@@ -242,7 +250,7 @@ status() {
     jq -e 'type == "object"' "$SETTINGS" >/dev/null 2>&1 ||
       die "$SETTINGS is not a JSON object; fix it and run again"
     entry=$(jq -r --arg re "$HOOK_RE" "$OURS_JQ"'(.hooks // {}) | to_entries[]
-      | .key as $event | .value[] | (.hooks // [])[] | select(ours)
+      | .key as $event | .value | arrays | .[] | hooks_of | select(ours)
       | "wired: \($event): \(.command // "")" + ((.args // []) | map(" " + tostring) | add // "")' \
       "$SETTINGS" 2>/dev/null) || die "could not read the wiring in $SETTINGS"
     [ -n "$entry" ] && printf '%s\n' "$entry" || echo "wired: none ($SETTINGS)"

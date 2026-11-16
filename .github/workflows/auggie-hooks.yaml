@@ -111,8 +111,9 @@ jobs:
       # an exported CDPATH, refuses an install whose destination appears
       # meanwhile, wires a scratch settings file beside other hooks, a
       # look-alike and stale entries, including ones with a redirection or run
-      # through args, fails --status on settings it cannot read, and checks the
-      # README's list of supplied files. /bin/bash, as below.
+      # through args, fails --status on settings it cannot read, cleans legacy
+      # entries under every event, after a separator and without a hooks list,
+      # and checks the README's list of supplied files. /bin/bash, as below.
       - name: Check the installer
         run: |
           set -euo pipefail
@@ -294,6 +295,32 @@ jobs:
           echo '{"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": "/a/beads-sync.sh"}]}]}}' >"$S"
           run --unwire >/dev/null
           [ "$(jq -c . "$S")" = '{}' ] || fail "an emptied hooks key must go: $(jq -c . "$S")"
+          # Rewiring and unwiring clean every event, recognise the name followed by a
+          # separator, and drop an entry that is one hook itself only where it runs these.
+          jq -n '{hooks: {
+            Stop: [{hooks: [{type: "command", command: "/old/beads-sync.sh"}]},
+                   {hooks: [{type: "command", command: "/x/stop.sh"}]}],
+            afterShellExecution: [{hooks: [{type: "command", command: "/old/beads-sync.sh"}]}],
+            PostToolUse: [{matcher: "bash", hooks: [{type: "command", command: "/old/beads-sync.sh; true"}]},
+                          {matcher: "bash", hooks: [{type: "command", command: "/old/beads-sync.sh&&true"}]}],
+            SessionEnd: [{type: "command", command: "/x/bare-foreign.sh"},
+                         {type: "command", command: "/old/beads-sync.sh"}]}}' >"$T/s3.json"
+          run3() { /bin/bash ./install.sh --prefix "$P" --settings "$T/s3.json" "$@"; }
+          cmds() { jq -r '.hooks[][] | if (.hooks | type) == "array" then .hooks[] else . end | .command' "$T/s3.json"; }
+          run3 --status >"$T/out"
+          for e in 'Stop: /old/beads-sync.sh' 'afterShellExecution: /old/beads-sync.sh' \
+            'PostToolUse: /old/beads-sync.sh; true' 'PostToolUse: /old/beads-sync.sh&&true' \
+            'SessionEnd: /old/beads-sync.sh'; do
+            grep -qF "wired: $e" "$T/out" || fail "status missed a legacy entry: $e"
+          done
+          run3 --wire >/dev/null
+          c=$(cmds)
+          ! grep -q '^/old/' <<<"$c" || fail "rewiring left a legacy hook: $(jq -c . "$T/s3.json")"
+          [ "$(grep -c 'current/.augment/hooks/beads-' <<<"$c")" = 3 ] || fail "rewiring did not add exactly three entries"
+          grep -qx /x/stop.sh <<<"$c" && grep -qx /x/bare-foreign.sh <<<"$c" || fail "rewiring dropped another hook"
+          run3 --unwire >/dev/null
+          [ "$(cmds | sort | tr '\n' ' ')" = "/x/bare-foreign.sh /x/stop.sh " ] ||
+            fail "unwire left: $(jq -c . "$T/s3.json")"
           # The README lists exactly the files a project holding a copy deletes.
           diff <(sed -n 's/^ *\(\.augment\/hooks\/[^ ]*\)$/\1/p' README.md | sort) \
             <(git ls-files .augment/hooks | sort) >/dev/null ||

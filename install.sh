@@ -8,6 +8,9 @@
 # touching the settings again. Installing a tag that is already installed only
 # moves the link, which is how to roll back.
 set -euo pipefail
+# An exported CDPATH makes `cd` print the directory it finds, which
+# `PREFIX=$(cd "$PREFIX" && pwd -P)` would capture beside the path.
+unset CDPATH
 
 PREFIX=${AUGGIE_BEADS_HOOKS_PREFIX:-${XDG_DATA_HOME:-$HOME/.local/share}/auggie-beads-hooks}
 SOURCE=${AUGGIE_BEADS_HOOKS_SOURCE:-https://github.com/nick-llewellyn/auggie-beads-hooks.git}
@@ -128,7 +131,12 @@ install_release() {
       die "could not check out $TAG"
     check_release "$TMP/$TAG" ||
       die "$TAG fails the release check: an entry point is missing or not executable, or a script does not parse"
-    mv "$TMP/$TAG" "$dest"
+    # A rename that refuses a destination with anything in it: where another
+    # install of the tag has published it meanwhile, `mv` put this checkout
+    # inside that one and reported success.
+    python3 -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' \
+      "$TMP/$TAG" "$dest" 2>/dev/null ||
+      die "$dest appeared while $TAG was being fetched, perhaps from another install; run again"
     rm -rf "$TMP"
     trap - EXIT
     echo "installed $TAG in $dest"

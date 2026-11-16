@@ -2866,6 +2866,41 @@ check_target '/tmp/home/store' 'HOME=/tmp/home; env BEADS_DIR=~\
 /store/.beads bd close CHR-1'
 check_target "$BASE/~/store" "HOME=/tmp/home; dash -c 'env BEADS_DIR=~/store/.beads bd close CHR-1'"
 check_unresolved 'HOME=/tmp/home; t && set -o posix; env BEADS_DIR=~/store/.beads bd close CHR-1'
+# A tilde after an unquoted `:` is expanded too, in an assignment and in an
+# argument shaped like one, and its prefix also ends at a `:` (#70). In POSIX
+# mode bash 3.2 still expands it in an argument and 5.2 does not; dash leaves
+# the argument as written. A quoted or escaped one, one running into an
+# expansion, and a `-C` operand stay as written.
+check_target '/tmp/home/one:/tmp/home/two' 'HOME=/tmp/home; env BEADS_DIR=~/one:~/two/.beads bd close CHR-1'
+check_target '/x:/tmp/home/two' 'HOME=/tmp/home; env BEADS_DIR=/x:~/two/.beads bd close CHR-1'
+check_target '/tmp/home/one:/tmp/home/two' 'HOME=/tmp/home; BEADS_DIR=~/one:~/two/.beads bd close CHR-1'
+check_target '/tmp/home/one:/tmp/home/two' 'HOME=/tmp/home; BEADS_DIR=~/one:~/two/.beads; export BEADS_DIR; bd close CHR-1'
+check_target '/tmp/home/one:/tmp/home/two' 'HOME=/tmp/home; export BEADS_DIR=~/one:~/two/.beads; bd close CHR-1'
+check_target '/tmp/home/one:/tmp/home/two' 'HOME=/tmp/home; declare -x BEADS_DIR=~/one:~/two/.beads; bd close CHR-1'
+check_target '/tmp/home/one:/tmp/home/two' 'HOME=/tmp/home; set -o posix; BEADS_DIR=~/one:~/two/.beads bd close CHR-1'
+check_unresolved 'HOME=/tmp/home; set -o posix; env BEADS_DIR=~/one:~/two/.beads bd close CHR-1'
+check_target '/x:~/two' "HOME=/tmp/home; dash -c 'env BEADS_DIR=/x:~/two/.beads bd close CHR-1'"
+check_target '/tmp/home:/tmp/home/two' 'HOME=/tmp/home; OUT=~:~/two; bd -C "$OUT" close CHR-1'
+check_target '/tmp/home/one:~/two' 'HOME=/tmp/home; env BEADS_DIR=~/one:"~"/two/.beads bd close CHR-1'
+check_target '/a:~/b' 'HOME=/tmp/home; OUT=/a\:~/b; bd -C "$OUT" close CHR-1'
+check_target '/a:~/x/b' 'HOME=/tmp/home; CS_S=/x; OUT=/a:~$CS_S/b; bd -C "$OUT" close CHR-1'
+check_target '/tmp/home/one:~/two' 'HOME=/tmp/home; bd -C ~/one:~/two close CHR-1'
+# `~+` after a `:` is the cwd in bash, ksh and zsh, and stays as written in
+# dash and busybox ash; outside bash and zsh it is in doubt.
+check_target '/x:/tmp/two' 'cd /tmp; OUT=/x:~+/two; bd -C "$OUT" close CHR-1'
+check_unresolved "dash -c 'cd /tmp; OUT=/x:~+/two; bd -C \"\$OUT\" close CHR-1'"
+check_unresolved "sh -c 'cd /tmp; OUT=/x:~+/two; bd -C \"\$OUT\" close CHR-1'"
+# The leading prefix is read where quoting still shows: an escaped or quoted
+# `:` or `/` in it, or an expansion it runs into, leaves it as written. A
+# home holding a pattern character is a literal path all the same.
+check_target "$BASE/~:~/two" 'HOME=/tmp/home; OUT=~\:~/two; bd -C "$OUT" close CHR-1'
+check_target "$BASE/~:/store" 'HOME=/tmp/home; OUT=~":"/store; bd -C "$OUT" close CHR-1'
+check_target "$BASE/~/store" 'HOME=/tmp/home; OUT=~"/"store; bd -C "$OUT" close CHR-1'
+check_target "$BASE/~/a" 'HOME=/tmp/home; CS_X=/a; OUT=~$CS_X; bd -C "$OUT" close CHR-1'
+check_target '/x:/tmp/h[1]/two' 'HOME="/tmp/h[1]"; env BEADS_DIR=/x:~/two/.beads bd close CHR-1'
+# A `~user` naming no user is left as written, so a pattern in it is still
+# matched on paths, as bash matches it.
+check_unresolved 'env BEADS_DIR=:~beads-hook-no-such-user*/.beads bd close CHR-1'
 
 # `~user` names that user's home from the passwd database, which HOME cannot
 # override. Handling only `~` and `~/` left it unexpanded -- and an unexpanded

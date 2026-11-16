@@ -17,23 +17,35 @@ SOURCE=${AUGGIE_BEADS_HOOKS_SOURCE:-https://github.com/nick-llewellyn/auggie-bea
 SETTINGS=$HOME/.augment/settings.json
 # jq regexes for a hook command. It runs one of these scripts where the
 # script's name, with or without a path and quoted or not, is a command: at
-# the start, after a newline, `;`, `&`, `|` or `(` outside quotes, or after
-# bash, sh, zsh, dash, env, exec, command or nohup and their options (for
-# command, only -p, since -v and -V look the name up). After a shell's -c,
-# the script must start the command string. A space or tab only separates
-# arguments, so in `echo /old/beads-sync.sh` the script is only mentioned,
-# which MENTION_RE finds. `/x/custom-beads-sync.sh` is someone else's hook,
-# and in `x>beads-sync.sh` the name is a redirect target.
+# the start, after a newline, `;`, `&`, `|` or `(` outside quotes and
+# comments and before any heredoc's `<<`, after `NAME=value` assignments, or
+# after bash, sh, zsh, dash, env, exec, command or nohup and their options.
+# A shell given -n, -o noexec, --help or --version runs no script, and
+# command's -v and -V only look the name up, so those do not count. After a
+# shell's -c, the script must start the command string. A space or tab only
+# separates arguments, so in `echo /old/beads-sync.sh` the script is only
+# mentioned, which MENTION_RE finds, as it is in `X=/old/beads-sync.sh`.
+# `/x/custom-beads-sync.sh` is someone else's hook, and in
+# `x>beads-sync.sh` the name is a redirect target. Still counted, though
+# they do not run the script: a function body that is never called, as in
+# `f() (/old/beads-sync.sh)`, and a `case` pattern. Telling those apart
+# would need a shell parser.
 _re_part='(?:[^\s;&|()<>"\x27\\]|\\.|"[^"]*"|\x27[^\x27]*\x27)'
-_re_dir="(?:$_re_part*/)?"
+_re_dir="(?![A-Za-z_][A-Za-z0-9_]*\\+?=|#)(?:$_re_part*/)?"
 _re_b='[ \t]+'
 _re_name='beads-(?:prime|sync)\.sh'
-_re_start='^(?:(?:[^"\x27\\]|\\.|"(?:[^"\\]|\\.)*"|\x27[^\x27]*\x27)*(?:[\n;(]|(?<![<>])[&|]))?[ \t]*'
-_re_shell="${_re_dir}(?:bash|sh|zsh|dash)(?:$_re_b(?:[-+][oO]$_re_b$_re_part+|--[A-Za-z-]+|[-+][A-Za-bd-z]+))*"
+_re_assign="[A-Za-z_][A-Za-z0-9_]*\\+?=$_re_part*"
+_re_text='(?:[^"\x27\\#<$]|\\.|"(?:[^"\\]|\\.)*"|\$\x27(?:[^\x27\\]|\\.)*\x27|\$(?!\x27)|\x27[^\x27]*\x27'
+_re_text+='|<<<|<(?!<)|(?<=[^\s;&|()<>])#|(?<![^\s;&|()<>])(?>#[^\n]*))*'
+_re_start="^(?:$_re_text(?:[\\n;(]|(?<![<>])[&|]))?[ \\t]*(?:$_re_assign$_re_b)*"
+_re_noexec='(?i:no[_-]?exec)'
+_re_shell="${_re_dir}(?:bash|sh|zsh|dash)(?:$_re_b(?:[-+]O$_re_b$_re_part+|\\+o$_re_b$_re_part+"
+_re_shell+="|-o$_re_b(?!$_re_noexec[ \\t])$_re_part+|--(?!(?:help|version|$_re_noexec)(?![A-Za-z-]))[A-Za-z-]+"
+_re_shell+="|[-+][A-Za-bd-mo-z]+))*"
 _re_wrap="(?:$_re_shell|${_re_dir}env(?:$_re_b(?:-[uCS]$_re_b$_re_part+|-$_re_part*|[A-Za-z_][A-Za-z0-9_]*=$_re_part*))*"
 _re_wrap+="|${_re_dir}exec(?:$_re_b(?:-a$_re_b$_re_part+|-$_re_part*))*|${_re_dir}command(?:$_re_b(?:-p|--))*"
 _re_wrap+="|${_re_dir}nohup(?:$_re_b-$_re_part*)*)"
-HOOK_RE="$_re_start(?:$_re_wrap$_re_b)*(?:$_re_shell$_re_b-[A-Za-z]*c[A-Za-z]*$_re_b[\"\\x27]?[ \\t]*$_re_dir$_re_name"
+HOOK_RE="$_re_start(?:$_re_wrap$_re_b)*(?:$_re_shell$_re_b-[A-Za-mo-z]*c[A-Za-mo-z]*$_re_b[\"\\x27]?[ \\t]*$_re_dir$_re_name"
 HOOK_RE+="|$_re_dir(?:$_re_name|\"(?:[^\"]*/)?$_re_name\"|\\x27(?:[^\\x27]*/)?$_re_name\\x27))"
 HOOK_RE+="(?=[\"\\x27]?(?:\\s|\$|[;&|)<>]))"
 MENTION_RE="(^|[/'\"\\s;&|(])beads-(prime|sync)\\.sh['\"]?(\\s|\$|[;&|)<>])"

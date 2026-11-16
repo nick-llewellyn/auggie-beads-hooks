@@ -10,21 +10,22 @@ Auggie CLI hooks that keep a [Beads](https://github.com/gastownhall/beads)
 - **Session end:** sync every store once more, as a backstop.
 
 `bd init` sets up Claude Code, Codex and Cursor, and `bd setup` has recipes
-for several other tools, but none for Auggie (as of `bd` 1.3.1). Use this
-repository as a template for a new project, or copy its files into an
-existing one.
+for several other tools, but none for Auggie (as of `bd` 1.3.1). Install a
+release of these hooks once per user and wire it into Auggie's user-level
+settings; projects need neither a copy of the hooks nor any wiring of their
+own. See [Installing](#installing).
 
 ## Contents
 
 | Path | Purpose |
 | --- | --- |
-| `.augment/settings.json` | Routes SessionStart, PostToolUse (`bash`) and SessionEnd to the hooks. |
+| `install.sh` | Installs a release for the current user and wires it into `~/.augment/settings.json`. |
 | `.augment/hooks/beads-prime.sh` | SessionStart: prints `bd prime` for the workspace. |
 | `.augment/hooks/beads-sync.sh` | PostToolUse and SessionEnd: commits, and optionally pushes, each store that was written. |
 | `.augment/hooks/lib/command-scan.sh` | Runs the scanner for `beads-sync.sh`. |
 | `.augment/hooks/lib/command_scan.py` | Parses the command with `shfmt --to-json` and reports whether any `bd` call can write, and to which store. |
 | `.augment/hooks/test/` | Classification, lock and prime test suites. |
-| `.github/workflows/auggie-hooks.yaml` | Runs the suites on Ubuntu and macOS when the hooks change. |
+| `.github/workflows/auggie-hooks.yaml` | Runs the suites, and checks the installer, on Ubuntu and macOS when either changes. |
 
 ## Requirements
 
@@ -49,7 +50,9 @@ not supported. The hooks run under bash; zsh is not needed.
   `bd dolt push --remote origin`.
 - **`bash`:** macOS `/bin/bash` 3.2 is supported, and CI runs the suites
   under it.
-- **`jq`:** without it, the sync hook warns and does nothing.
+- **`jq`:** without it, the sync hook warns and does nothing. `install.sh`
+  needs it to wire the hooks.
+- **`git`:** `install.sh` fetches a release with it.
 - **`shfmt` and `python3`**, for the scanner: without them, the sync hook
   warns and syncs the workspace roots after every shell command as a
   precaution. An `shfmt` older than the minimum may lack the `--to-json`
@@ -88,10 +91,10 @@ sync. A command too deeply nested to scan within a few seconds is treated as
 a failed scan: the workspace roots are synced and the hook warns.
 
 Auggie CLI 1.2.0 renamed the shell tool from `launch-process` to `bash`, and
-passes each hook the name its matcher uses. `settings.json` matches `bash`;
-on an older CLI, set the matcher to `launch-process`. The hook accepts either
-name, so a copy whose matcher still says `launch-process`, which 1.x matches
-for now but flags as deprecated, keeps syncing.
+passes each hook the name its matcher uses. The wiring `install.sh` writes
+matches `bash`; on an older CLI, set the matcher to `launch-process`. The hook
+accepts either name, so wiring whose matcher still says `launch-process`,
+which 1.x matches for now but flags as deprecated, keeps syncing.
 
 On **SessionEnd**, it syncs every workspace root that has a `.beads/`, and
 every recorded external store, without looking at any command. This catches
@@ -127,50 +130,67 @@ session's records once the registry holds them.
 The hook always exits 0. It reports problems as `beads:` warnings: on
 PostToolUse as context the agent sees with the tool result, on SessionEnd on
 stderr. A failed commit or push leaves the request marked, and the next sync
-retries it. `settings.json` gives the sync hook 60 seconds and the prime hook
-15.
+retries it. The wiring gives the sync hook 60 seconds and the prime hook 15.
 
-## Adopting the hooks
+## Installing
 
-### New project
+Install a release once per user, then wire it into Auggie's user-level
+settings. `<tag>` is the latest release, from the repository's Releases
+page:
 
-Create a repository from this template, with **Use this template** on GitHub
-or `gh repo create <name> --template nick-llewellyn/auggie-beads-hooks`, then
-follow steps 2 to 6 below.
+```bash
+git clone --depth 1 --branch <tag> https://github.com/nick-llewellyn/auggie-beads-hooks /tmp/auggie-beads-hooks
+/tmp/auggie-beads-hooks/install.sh <tag> --wire
+```
 
-### Existing project
+`install.sh <tag>` fetches the tag into
+`~/.local/share/auggie-beads-hooks/<tag>` (under `$XDG_DATA_HOME` where that
+is set, or `--prefix <dir>`), checks it, and points `current` beside it at
+that release. `--wire` then writes three entries into
+`~/.augment/settings.json`, replacing any earlier ones for these hooks and
+keeping the rest of the file, which it leaves as `settings.json.bak`:
 
-1. Copy the files, keeping their executable bits:
+```json
+{
+  "hooks": {
+    "SessionStart": [
+      {"hooks": [{"type": "command", "command": "<home>/.local/share/auggie-beads-hooks/current/.augment/hooks/beads-prime.sh", "timeout": 15000}]}
+    ],
+    "PostToolUse": [
+      {"matcher": "bash", "hooks": [{"type": "command", "command": "<home>/.local/share/auggie-beads-hooks/current/.augment/hooks/beads-sync.sh", "timeout": 60000}]}
+    ],
+    "SessionEnd": [
+      {"hooks": [{"type": "command", "command": "<home>/.local/share/auggie-beads-hooks/current/.augment/hooks/beads-sync.sh", "timeout": 60000}]}
+    ]
+  }
+}
+```
 
-   ```bash
-   git clone --depth 1 --branch <tag> https://github.com/nick-llewellyn/auggie-beads-hooks /tmp/auggie-beads-hooks
-   mkdir -p .augment .github/workflows
-   cp -Rp /tmp/auggie-beads-hooks/.augment/hooks .augment/
-   cp -p /tmp/auggie-beads-hooks/.github/workflows/auggie-hooks.yaml .github/workflows/
-   ```
+On Auggie CLI before 1.2.0, change the PostToolUse matcher to
+`launch-process`; see
+[PostToolUse and SessionEnd](#posttooluse-and-sessionend-beads-syncsh).
 
-   `<tag>` is the latest release, from the repository's Releases page.
+Auggie runs these hooks in every workspace. In one with no `.beads/`, and
+no command that writes a store elsewhere, they change nothing, though the
+sync hook still scans each shell command, which adds a fraction of a second
+to it.
 
-   If the project has no `.augment/settings.json`, copy that file too. If it
-   has one, add the three entries from this repository's file to its `hooks`
-   object. The commands are relative paths, which Auggie resolves against the
-   workspace root.
+Keep no other wiring of the hooks: Auggie runs every matching hook from
+every settings file, so a project that also wires them runs them twice. To
+move a project off its own copy, see
+[Moving a project off a copy](#moving-a-project-off-a-copy).
 
-2. On Auggie CLI before 1.2.0, change the PostToolUse matcher in
-   `.augment/settings.json` from `bash` to `launch-process`; see
-   [PostToolUse and SessionEnd](#posttooluse-and-sessionend-beads-syncsh).
-3. Initialise Beads if the project does not use it yet: `bd init`. Add
+`install.sh --status` shows the current release, the installed ones and the
+wiring; `install.sh --help` lists the options.
+
+### Setting up a project
+
+1. Initialise Beads if the project does not use it yet: `bd init`. Add
    `--skip-agents` to leave out the Claude Code, Codex and Cursor files it
    would otherwise generate.
-4. Choose where the store syncs; see the next section.
-5. Ignore the hook's state files; see
+2. Choose where the store syncs; see the next section.
+3. Ignore the hook's state files; see
    [Git ignores](#git-ignores-for-augment-sync-state).
-6. Commit, and check that git recorded the executable bits. This prints
-   nothing when they are all set:
-
-   ```bash
-   git ls-files -s .augment/hooks | awk '$1 != "100755" {print "not executable:", $4}'
-   ```
 
 A new Auggie session in the project should then open with the Beads workflow
 context, except under Auggie CLI before 1.2.0 (see
@@ -178,58 +198,72 @@ context, except under Auggie CLI before 1.2.0 (see
 You can also run the hooks by hand:
 
 ```bash
-AUGMENT_PROJECT_DIR="$PWD" .augment/hooks/beads-prime.sh </dev/null | head
+H=~/.local/share/auggie-beads-hooks/current/.augment/hooks
+AUGMENT_PROJECT_DIR="$PWD" "$H/beads-prime.sh" </dev/null | head
 jq -n --arg w "$PWD" '{hook_event_name: "SessionEnd", workspace_roots: [$w]}' |
-  .augment/hooks/beads-sync.sh
+  "$H/beads-sync.sh"
 ```
 
 The second command syncs the store, and prints nothing when it succeeds.
 
-### Keeping copies in step
+### Updating and rolling back
 
-A project that adopts the hooks holds its own copy, so a fix made in one copy
-reaches the others only by hand. This repository is the upstream for all of
-them:
+Run `install.sh` with the new tag, from the current release or from a clone
+of the new one:
 
-1. Make every change to `.augment/hooks/` here first, including a fix found
-   while working in a project's copy, with a test that fails without it.
-2. Run the three suites here, and open the pull request.
-3. Bring each project's copy level with a release, an annotated tag
-   `vX.Y.Z` on `main` listed on the repository's Releases page. Copy the
-   files under `.augment/hooks/` in a checkout of the tag over the copy's,
-   and delete only the upstream files the release dropped. To list them,
-   fetch the tag the copy was last brought level with, which the shallow
-   clone from [Existing project](#existing-project) step 1 lacks, then
-   compare the two tags; each file marked `D` was dropped:
+```bash
+~/.local/share/auggie-beads-hooks/current/install.sh <new-tag>
+```
 
-   ```bash
-   git fetch origin tag <old-tag>
-   git diff --name-status --no-renames <old-tag> <new-tag> -- .augment/hooks
-   ```
+It installs the release beside the others and moves `current`, so the wiring
+needs no change. Installing a release that is already installed only moves
+`current`, which is how to roll back. Delete a release no longer needed with
+`rm -rf ~/.local/share/auggie-beads-hooks/<tag>`. Each release's notes say
+whether it needs anything beyond installing; see [Versioning](#versioning).
 
-   Leave the project's own hook files untouched. Then restore the lines that
-   differ for the project's own reasons, such as temporary-file prefixes. A
-   single fix needed before the next release can be applied on its own, from
-   a checkout of this repository:
+### Moving a project off a copy
 
-   ```bash
-   git format-patch -1 --stdout <commit> -- .augment/hooks | git -C /path/to/project apply
-   ```
+Earlier versions of this README had each project hold its own copy of
+`.augment/hooks/`, or run a checkout's scripts by path. To move such a
+project to the installed release:
 
-4. Run the three suites in each copy before pushing, and name the release
-   tag in the commit, or the upstream commit for a fix applied on its own.
-5. On every refresh, check that the copy still ignores the hook's state
-   files; see [Git ignores](#git-ignores-for-augment-sync-state).
+1. Install and wire a release as above.
+2. In one change to the project:
+   - delete `.augment/hooks/`;
+   - remove the three hook entries from `.augment/settings.json`, or from
+     `.augment/settings.local.json`, and the file if nothing else is left in
+     it;
+   - remove the hook test job, whether a copy of `auggie-hooks.yaml` or jobs
+     folded into another workflow, and any required status check on it,
+     such as `Auggie hook tests gate`;
+   - keep the `.augment-sync.*` ignore, or add it; see
+     [Git ignores](#git-ignores-for-augment-sync-state).
+3. On Auggie CLI 1.2.0 or later, remove any workspace rule that runs
+   `bd prime`, or the context reaches the agent twice.
 
-A project that runs the hooks by path from a local checkout of this
-repository, rather than holding a copy, should point at a checkout of a
-release tag, not at a working clone, whose hooks change whenever its branch
-does.
+`/hooks` in an Auggie session in the project should then list one
+SessionStart, one PostToolUse and one SessionEnd entry for these hooks, all
+from the user-level settings.
 
-A review finding raised on a project's pull request is answered there, but
-fixed here first, so the copies stay identical apart from those adjusted
-lines. To see what a copy has drifted from, run `diff -r` between its
-`.augment/hooks/` and this repository's.
+A fix found while working in a project is made here, and reaches the project
+in a release.
+
+### Versioning
+
+Releases are annotated tags `vMAJOR.MINOR.PATCH` on `main`, each listed on
+the Releases page with its notes. From 1.0.0:
+
+- **Patch:** fixes. Installing is all an update needs.
+- **Minor:** new behaviour, such as reading a new Auggie event field.
+  Installing is still all an update needs.
+- **Major:** a change that needs more than installing: to the wiring (its
+  events, matcher or commands) or the install layout, or to a minimum
+  version in [Requirements](#requirements). The release notes say what to
+  do.
+
+Before 1.0.0, a change that needs more than installing bumps the minor
+version instead, and its release notes say what to do. Only the latest
+release is fixed; there are no backports.
 
 ## Choosing where the store syncs
 
@@ -325,7 +359,7 @@ All of it is per-machine and transient. The `.beads/.gitignore` that
 `bd init` generates covers only the lock, through `*.lock`, so add:
 
 ```gitignore
-# Auggie sync hook state (.augment/hooks/beads-sync.sh)
+# Auggie Beads sync hook state (beads-sync.sh)
 .augment-sync.*
 ```
 
@@ -355,54 +389,27 @@ reaped, which needs an init.
 
 ## CI with GitHub Actions
 
-Copy `.github/workflows/auggie-hooks.yaml` into the project's
-`.github/workflows/`. It has two jobs:
+`.github/workflows/auggie-hooks.yaml` has two jobs:
 
 - **`changes`** compares the pushed or proposed commits with their base, and
-  reports whether `.augment/` or the workflow itself changed. When the base
-  cannot be read (a manual run, a new branch, a force push), it reports a
-  change. It uses `git diff` rather than a third-party filter action.
+  reports whether `.augment/`, `install.sh` or the workflow itself changed.
+  When the base cannot be read (a manual run, a new branch, a force push), it
+  reports a change. It uses `git diff` rather than a third-party filter
+  action.
 - **`auggie-hooks`** runs only when `changes` reports a change, on
   `ubuntu-latest` and `macos-latest`. It installs `shfmt` (on Ubuntu, the
   v3.12.0 release binary, checked against its SHA-256; on macOS, Homebrew's
   latest, so the two legs cover different versions), checks that the entry
-  points are executable and every script parses, and runs the three suites
-  under `/bin/bash`.
+  points and the installer are executable and every script parses, installs
+  and wires the checkout itself with `install.sh` in scratch directories,
+  and runs the three suites under `/bin/bash`.
 
-Each leg takes 8 to 10 minutes. On private repositories macOS minutes are
-billed at a higher rate, which is what the path filter is for.
-
-To fold the jobs into an existing workflow instead, copy both jobs and change
-the workflow path in the `changes` filter to that workflow's file.
-
-### Required status checks
-
-When `auggie-hooks` is skipped, GitHub reports it under its unexpanded name,
-`Auggie hook tests (${{ matrix.os }})`, so branch protection cannot require
-the per-platform checks. To require one check, add a gate job to the workflow
-and require `Auggie hook tests gate`:
-
-```yaml
-  auggie-hooks-gate:
-    name: Auggie hook tests gate
-    runs-on: ubuntu-latest
-    needs: [changes, auggie-hooks]
-    if: always()
-    steps:
-      - env:
-          CHANGES: ${{ needs.changes.result }}
-          HOOKS: ${{ needs.auggie-hooks.result }}
-        run: |
-          case "$CHANGES/$HOOKS" in
-            success/success | success/skipped) exit 0 ;;
-            *) echo "changes=$CHANGES auggie-hooks=$HOOKS" >&2; exit 1 ;;
-          esac
-```
+Each leg takes 8 to 10 minutes, which is what the path filter is for.
 
 ## Limitations
 
-- The hooks run only under the Auggie CLI. In a host that does not read
-  `.augment/settings.json`, bead writes are neither committed nor pushed by
+- The hooks run only under the Auggie CLI. In a host that does not run
+  Auggie's hooks, bead writes are neither committed nor pushed by
   these hooks; run `bd dolt commit`, and `bd dolt push --remote origin` where
   the store pushes, before ending such a session.
 - Auggie CLI before 1.2.0, 0.36.0 among them, runs the SessionStart hook
@@ -471,17 +478,18 @@ and require `Auggie hook tests gate`:
   store.
 - **No Beads context at session start**: expected under Auggie CLI before
   1.2.0; see [Limitations](#limitations). Otherwise, check that the session
-  runs under the Auggie CLI, that `.augment/hooks/*.sh` are executable, and
-  that the workspace has a `.beads/`.
+  runs under the Auggie CLI, that `install.sh --status` shows a current
+  release and its three wired entries, and that the workspace has a
+  `.beads/`.
 - **A sync keeps waiting on a lock**: a lock whose owner has died is
   reclaimed automatically, but a `bd` the hook started keeps the lock until
   it exits. If no `bd` is running, delete `.beads/.augment-sync.lock`.
 
 ## Removing the hooks
 
-Delete `.augment/hooks/`, the three entries in `.augment/settings.json` and
-`.github/workflows/auggie-hooks.yaml`, then any `.beads/.augment-sync.*`
-files.
+`install.sh --unwire` removes the three entries from
+`~/.augment/settings.json`. Then delete `~/.local/share/auggie-beads-hooks/`,
+and any `.beads/.augment-sync.*` files in projects.
 
 ## License
 

@@ -1,7 +1,5 @@
-# Runs the Auggie Beads hook test suites. Copy this file into a project's
-# .github/workflows/ as it is: the path filter below names this file, so a
-# copy under the same name needs no edits. To merge the two jobs into an
-# existing workflow instead, change that filter to the workflow's own path.
+# Runs the Auggie Beads hook test suites, and checks install.sh, the per-user
+# installer that projects use in place of a copy of the hooks.
 name: Auggie hooks
 
 on:
@@ -34,8 +32,8 @@ jobs:
           fetch-depth: 0
 
       # The hook suites take about ten minutes per platform, so they run only
-      # when .augment/ or this workflow changes. A base that cannot be read
-      # (a manual run, a new branch, a force push) runs them.
+      # when .augment/, install.sh or this workflow changes. A base that cannot
+      # be read (a manual run, a new branch, a force push) runs them.
       - id: diff
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -43,7 +41,7 @@ jobs:
           hooks=true
           if git cat-file -e "${BASE}^{commit}" 2>/dev/null; then
             changed=$(git diff --name-only "$BASE" HEAD)
-            grep -qE '^(\.augment/|\.github/workflows/auggie-hooks\.yaml$)' <<<"$changed" ||
+            grep -qE '^(\.augment/|install\.sh$|\.github/workflows/auggie-hooks\.yaml$)' <<<"$changed" ||
               hooks=false
           fi
           echo "auggie_hooks=$hooks" >>"$GITHUB_OUTPUT"
@@ -89,20 +87,85 @@ jobs:
           fi
           shfmt --version
 
-      # settings.json runs the two entrypoints directly, so a lost executable
-      # bit disables them while `bash -n` stays green.
+      # The wiring runs the two entry points directly, and the installer is run
+      # as a command, so a lost executable bit disables them while `bash -n`
+      # stays green.
       - name: Check hook syntax
         run: |
           rc=0
-          for f in .augment/hooks/beads-prime.sh .augment/hooks/beads-sync.sh; do
+          for f in .augment/hooks/beads-prime.sh .augment/hooks/beads-sync.sh install.sh; do
             [ -x "$f" ] || { echo "ERROR: $f is not executable" >&2; rc=1; }
           done
           for f in .augment/hooks/*.sh .augment/hooks/lib/*.sh \
-            .augment/hooks/test/*.sh; do
+            .augment/hooks/test/*.sh install.sh; do
             bash -n "$f" || rc=1
           done
           python3 -m py_compile .augment/hooks/lib/command_scan.py || rc=1
           exit "$rc"
+
+      # Installs this checkout under two temporary tags into a prefix holding a
+      # space, rolls back, refuses bad tags, and wires a scratch settings file
+      # beside other hooks and a stale entry. /bin/bash, as below.
+      - name: Check the installer
+        run: |
+          set -euo pipefail
+          fail() { echo "FAIL: $*" >&2; exit 1; }
+          T=$(mktemp -d)
+          P="$T/with space/abh"
+          S="$T/settings.json"
+          git tag -f v0.0.1-ci HEAD >/dev/null
+          git tag -f v0.0.2-ci HEAD >/dev/null
+          trap 'git tag -d v0.0.1-ci v0.0.2-ci >/dev/null; rm -rf "$T"' EXIT
+          run() { /bin/bash ./install.sh --prefix "$P" --source "file://$PWD" --settings "$S" "$@"; }
+          # Install, reinstall, install another and roll back.
+          run v0.0.1-ci
+          [ "$(readlink "$P/current")" = v0.0.1-ci ] || fail "current is not v0.0.1-ci"
+          [ -x "$P/current/.augment/hooks/beads-sync.sh" ] || fail "entry point not executable"
+          run v0.0.1-ci >"$T/out"; grep -q 'already installed' "$T/out" || fail "a reinstall must not clone again"
+          run v0.0.2-ci
+          [ "$(readlink "$P/current")" = v0.0.2-ci ] || fail "current did not move"
+          run v0.0.1-ci >/dev/null
+          [ "$(readlink "$P/current")" = v0.0.1-ci ] || fail "rollback did not move current"
+          # A bad tag fails and leaves nothing behind.
+          ! run v9.9.9 2>/dev/null || fail "an unknown tag must fail"
+          ! run main 2>/dev/null || fail "a branch name must be refused"
+          [ -z "$(find "$P" -maxdepth 1 -name '.install.*')" ] || fail "a failed install left a temporary directory"
+          [ "$(readlink "$P/current")" = v0.0.1-ci ] || fail "a failed install moved current"
+          # Wiring replaces any earlier entries for these hooks and keeps the rest.
+          jq -n '{model: "m", hooks: {
+            PostToolUse: [{matcher: "edit", hooks: [{type: "command", command: "/x/fmt.sh"}]},
+                          {matcher: "launch-process", hooks: [{type: "command", command: "/old/beads-sync.sh"}]}],
+            Stop: [{hooks: [{type: "command", command: "/x/stop.sh"}]}]}}' >"$S"
+          run --wire >/dev/null
+          [ -e "$S.bak" ] || fail "no backup kept"
+          H="'$(cd "$P" && pwd -P)/current/.augment/hooks"
+          jq -e --arg p "$H/beads-prime.sh'" --arg s "$H/beads-sync.sh'" '
+            .model == "m"
+            and ([.hooks.SessionStart[].hooks[].command] == [$p])
+            and ([.hooks.SessionEnd[].hooks[].command] == [$s])
+            and ([.hooks.PostToolUse[] | {m: .matcher, c: .hooks[].command}]
+                 == [{m: "edit", c: "/x/fmt.sh"}, {m: "bash", c: $s}])
+            and ([.hooks.Stop[].hooks[].command] == ["/x/stop.sh"])' "$S" >/dev/null ||
+            fail "unexpected wiring: $(jq -c . "$S")"
+          cp "$S" "$T/once"
+          run --wire >"$T/out"; grep -q unchanged "$T/out" || fail "wiring twice must change nothing"
+          cmp -s "$S" "$T/once" || fail "wiring twice changed the file"
+          # The wired commands run through the shell, as Auggie runs them.
+          mkdir -p "$T/ws"
+          cmd=$(jq -r '.hooks.SessionStart[0].hooks[0].command' "$S")
+          AUGMENT_PROJECT_DIR="$T/ws" sh -c "$cmd" </dev/null || fail "the wired prime command did not run"
+          cmd=$(jq -r '.hooks.SessionEnd[0].hooks[0].command' "$S")
+          jq -n --arg w "$T/ws" '{hook_event_name: "SessionEnd", workspace_roots: [$w]}' |
+            sh -c "$cmd" || fail "the wired sync command did not run"
+          run --status >"$T/out"; grep -q 'wired: SessionEnd' "$T/out" || fail "status does not show the wiring"
+          # Unwiring removes only these entries, and the hooks key once it is empty.
+          run --unwire >/dev/null
+          jq -e '([.hooks[][].hooks[].command] | sort) == ["/x/fmt.sh", "/x/stop.sh"]' "$S" >/dev/null ||
+            fail "unwire left: $(jq -c . "$S")"
+          echo '{"hooks": {"SessionEnd": [{"hooks": [{"type": "command", "command": "/a/beads-sync.sh"}]}]}}' >"$S"
+          run --unwire >/dev/null
+          [ "$(jq -c . "$S")" = '{}' ] || fail "an emptied hooks key must go: $(jq -c . "$S")"
+          echo "installer check: ok"
 
       # /bin/bash rather than bash: on macOS it is 3.2. The suites run the
       # hooks under their own interpreter, so this covers the hooks as well.

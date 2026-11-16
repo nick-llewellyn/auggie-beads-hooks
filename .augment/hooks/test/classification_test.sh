@@ -2860,6 +2860,11 @@ check_target '/tmp/home/one:~/two' 'HOME=/tmp/home; env BEADS_DIR=~/one:"~"/two/
 check_target '/a:~/b' 'HOME=/tmp/home; OUT=/a\:~/b; bd -C "$OUT" close CHR-1'
 check_target '/a:~/x/b' 'HOME=/tmp/home; CS_S=/x; OUT=/a:~$CS_S/b; bd -C "$OUT" close CHR-1'
 check_target '/tmp/home/one:~/two' 'HOME=/tmp/home; bd -C ~/one:~/two close CHR-1'
+# `~+` after a `:` is the cwd in bash, ksh and zsh, and stays as written in
+# dash and busybox ash; outside bash and zsh it is in doubt.
+check_target '/x:/tmp/two' 'cd /tmp; OUT=/x:~+/two; bd -C "$OUT" close CHR-1'
+check_unresolved "dash -c 'cd /tmp; OUT=/x:~+/two; bd -C \"\$OUT\" close CHR-1'"
+check_unresolved "sh -c 'cd /tmp; OUT=/x:~+/two; bd -C \"\$OUT\" close CHR-1'"
 # The leading prefix is read where quoting still shows: an escaped or quoted
 # `:` or `/` in it, or an expansion it runs into, leaves it as written. A
 # home holding a pattern character is a literal path all the same.

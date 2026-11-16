@@ -2281,6 +2281,12 @@ class Scanner:
                 if "\\" in rest[:end] or \
                         end == len(rest) and index < len(parts) - 1:
                     continue
+                # `~+` is bash's, ksh's and zsh's, not POSIX's: dash and
+                # busybox ash leave `OUT=/x:~+/two` as written. Only bash and
+                # zsh are told apart here, so elsewhere it is in doubt.
+                if rest[:end] == "~+" and \
+                        self.scope.bash is not True and not self.scope.zsh:
+                    return UNKNOWN
                 home = self.expand_tilde(rest[:end])
                 if home is UNKNOWN:
                     return UNKNOWN

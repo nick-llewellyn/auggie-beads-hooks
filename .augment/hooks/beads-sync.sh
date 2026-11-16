@@ -1043,8 +1043,11 @@ if [ "$EVENT_NAME" = "PostToolUse" ]; then
   # A launch with `wait: false` returns as its command starts, so any write
   # in it may land after this sync, as one behind `&` may: `sleep 6; bd -C
   # /ext close X` launched so was synced and settled before it wrote. Its
-  # stores are recorded for SessionEnd instead; see `remember_async`.
-  WAIT_MODE=$(jq -r 'if (.tool_input.wait | tostring) == "false"
+  # stores are recorded for SessionEnd instead; see `remember_async`. Auggie
+  # 1.x marks such a call with `background: true` in place of `wait: false`,
+  # and fires PostToolUse as its job starts.
+  WAIT_MODE=$(jq -r 'if (.tool_input.wait | tostring) == "false" or
+    .tool_input.background == true
     then "unwaited" else "" end' <<<"$EVENT_JSON")
 
   # Every `bd` in the command is examined rather than stopping at the first,

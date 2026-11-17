@@ -2084,6 +2084,38 @@ grep -qF "push $NLROOT" "$BD_LOG.dirs" && report ok ||
 rm -rf "$NLWS"
 teardown
 
+# --- an event field's NUL or trailing newlines move no other field ------
+# The hook reads the event's fields in one `jq`, each ended by a NUL, with a NUL
+# inside a field removed and trailing newlines stripped, as the `$(jq -r ...)`
+# that read each field before did. A NUL left in a field splits it and shifts
+# every field after it, the roots among them; trailing newlines left on the
+# tool or event name make it one the hook does not recognise. Each event names
+# a second root with a store after the scratch one, so both must sync, or, for
+# a read-only command, neither. A name the hook does not recognise as an event
+# syncs every root, which is why that case runs `bd list`.
+setup
+TWO=$(mktemp -d)
+mkdir -p "$TWO/.beads"
+while IFS='|' read -r WANT FIRED EDIT; do
+  rm -f "$BD_LOG.dirs"
+  event "$FIRED" "$TWO" | jq "$EDIT" | "$BASH_UNDER_TEST" "$HOOK" >/dev/null 2>&1
+  if [ "$WANT" = both ]; then
+    grep -qF "push $WS" "$BD_LOG.dirs" 2>/dev/null &&
+      grep -qF "push $TWO" "$BD_LOG.dirs" && report ok ||
+      report bad "$EDIT with $FIRED must sync both roots (dirs: $({ tr '\n' ',' <"$BD_LOG.dirs"; } 2>/dev/null))"
+  else
+    [ ! -s "$BD_LOG.dirs" ] && report ok ||
+      report bad "$EDIT with $FIRED must sync nothing (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
+  fi
+done <<'CASES'
+both|bd close CHR-1|.conversation_id = "a\u0000b"
+both|bd close CHR-1|.tool_input.command = "bd list\u0000 && bd close CHR-1"
+both|bd close CHR-1|.tool_name += "\n"
+none|bd list|.hook_event_name += "\n\n"
+CASES
+rm -rf "$TWO"
+teardown
+
 # --- a scanner that fails is not a command that writes nothing ----------
 # `scan_command` left SCAN_MUTATES at its initial 0 when the scanner died
 # before emitting anything, which reads exactly like "no write here": the sync

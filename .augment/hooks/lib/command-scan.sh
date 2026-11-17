@@ -134,13 +134,14 @@ unset _sc_name _sc_re _sc_c _sc_i
 # It says no only where the text is one line, as bash runs the lines before
 # one it rejects, so the scan's word on a line it cannot read stands; and,
 # its quotes and backslashes aside, holds no `bd` in either case; none of `$`,
-# a backquote, `{`, `}`, `*`, `?` or `[`, through which an expansion, a
-# substitution or a glob could spell one; and no word, with or without a path,
-# that runs code the text does not show: `eval`, `source`, `.`, `exec`,
-# `command`, `builtin`, `xargs`, a shell, or `env`, whose `-S` decodes escapes
-# into a command. The scan stays the only judge of what a command writes; this
-# only says where it could find nothing. A script or program the command starts
-# can still run a `bd`, which neither reads.
+# a backquote, `{`, `}`, `(`, `)`, `*`, `?` or `[`, through which an expansion,
+# a substitution or a glob could spell one, as zsh's `b(d|x)` does in a line
+# bash refuses; and no word, with or without a path, that runs code the text
+# does not show: `eval`, `source`, `.`, `exec`, `command`, `builtin`, `xargs`,
+# a shell, or `env`, whose `-S` decodes escapes into a command. The scan stays
+# the only judge of what a command writes; this only says where it could find
+# nothing. A script or program the command starts can still run a `bd`, which
+# neither reads.
 #
 # Matched with regexes rather than by removing the quotes first, which bash 3.2
 # does in time that grows with the square of the text: seconds for a few
@@ -152,6 +153,7 @@ scan_may_run_bd() {
     *$'\n'* | *'$'* | *'`'* | *'{'* | *'}'* | *'*'* | *'?'* | *'['*)
       return 0
       ;;
+    *'('* | *')'*) return 0 ;;
   esac
   [[ $1 =~ $_SC_RUNS_BD ]]
   [ $? -eq 1 ] || return 0

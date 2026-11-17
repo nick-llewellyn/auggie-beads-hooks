@@ -44,18 +44,12 @@ mkdir -p "$STORE/.beads" "$STORE/sub/deeper"
 # A second, to assert that the walk stops at the nearest rather than the first.
 mkdir -p "$STORE/nested/inner/.beads"
 
-# The hook skips the scan where scan_may_run_bd says a command's text cannot
-# run a `bd`, so that must never be said of a command the scan finds reaching a
-# store. One line that bash refuses, such as `echo )))`, runs nothing at all
-# and is let through: the scan counts it as an unresolved write, as it cannot
-# read it, so the hook warns of it where a root has a store. Several lines are
-# not, since bash runs the lines before one it refuses. Every scan below is
+# The hook skips the scan where scan_may_run_bd says a command's text gives the
+# scan nothing to find, so that must never be said of a command the scan finds
+# reaching a store, a line it cannot read and so counts as an unresolved write
+# among them: zsh runs `b(d|x)`, which bash refuses. Every scan below is
 # checked, and the last case reports each command the check failed. Recorded
 # in files, as `check` scans in a subshell.
-refused_line() {
-  case "$1" in *$'\n'*) return 1 ;; esac
-  ! "${BASH:-bash}" -n -c "$1" 2>/dev/null
-}
 _SUITE_SCAN=$(declare -f scan_command)
 eval "_suite_scan_command${_SUITE_SCAN#scan_command}"
 scan_command() {
@@ -63,9 +57,7 @@ scan_command() {
   if [ "$SCAN_MUTATES" -eq 1 ] || [ "$SCAN_UNRESOLVED" -gt 0 ] ||
     [ "${#SCAN_TARGETS[@]}" -gt 0 ] || [ "${#SCAN_ASYNC[@]}" -gt 0 ]; then
     printf . >>"$CD/scans-reaching"
-    if ! scan_may_run_bd "$1" && ! refused_line "$1"; then
-      printf '%s\0' "$1" >>"$CD/scans-skipped"
-    fi
+    scan_may_run_bd "$1" || printf '%s\0' "$1" >>"$CD/scans-skipped"
   fi
   return 0
 }
@@ -2638,6 +2630,9 @@ check_target '/tmp/store' 'echo é ; bd -C /tmp/store close CHR-1 ))))'
 # What is cut off counts as a script that cannot be read, so a stray closer
 # warns even with no write before it.
 check_unresolved 'echo é ; )'
+# zsh expands `b(d|x)` to `bd` where that file exists, a glob in a line bash
+# refuses, so the line can run a write the scan cannot read.
+check_unresolved '/usr/local/bin/b(d|x) -C /tmp/store close CHR-1'
 # Several lines run up to the one the shell refuses, so `./run` has run, and
 # may have written a store, by the time `echo )))` fails.
 check_unresolved $'./run\necho )))'
@@ -3723,6 +3718,13 @@ check_may_run scan '{b,}d close CHR-1'
 check_may_run scan 'b? close CHR-1'
 check_may_run scan 'b* close CHR-1'
 check_may_run scan 'b[d] close CHR-1'
+# A parenthesis, as zsh's glob grouping or bash's extglob can spell one with
+# it, and a line bash refuses for a stray closer may be one zsh runs.
+check_may_run scan '/usr/local/bin/b(d|x) -C /tmp/store close CHR-1'
+check_may_run scan 'echo )))'
+check_may_run scan 'echo é ; )'
+check_may_run scan '(cd x && make)'
+check_may_run scan 'git log --format=(x)'
 # A word that runs code the text does not show, with or without a path.
 for RUNNER in eval source . exec command builtin env xargs sh bash zsh dash \
   ksh mksh busybox; do

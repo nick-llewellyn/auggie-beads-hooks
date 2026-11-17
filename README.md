@@ -93,14 +93,15 @@ a failed scan: the workspace roots are synced and the hook warns.
 Where no workspace root has a `.beads/`, it first tests the command's text,
 and neither scans nor syncs a command of one line whose text gives the scan
 nothing to find: one that, its quotes and backslashes aside, holds no `bd`
-in either case, none of `$`, a backquote, `{`, `}`, `*`, `?` or `[`, and no
-word that runs code the text does not show, such as `eval`, `source`, `env`,
-`xargs` or a shell. This tests the text, not what the command does: a script
-or program the command runs, such as `./script.sh`, can still run `bd`
-without the test or the scan seeing it; see [Limitations](#limitations).
-Every other command is scanned, so `bd -C /other/repo close X` run there
-still syncs that store. A command of several lines is always scanned, as
-bash runs the lines before one it refuses.
+in either case, none of `$`, a backquote, `{`, `}`, `(`, `)`, `*`, `?` or
+`[`, and no word that runs code the text does not show, such as `eval`,
+`source`, `env`, `xargs` or a shell. This tests the text, not what the
+command does: a script or program the command runs, such as `./script.sh`,
+can still run `bd` without the test or the scan seeing it; see
+[Limitations](#limitations). Every other command is scanned, so
+`bd -C /other/repo close X` run there still syncs that store. A command of
+several lines is always scanned, as bash runs the lines before one it
+refuses.
 
 Auggie CLI 1.2.0 renamed the shell tool from `launch-process` to `bash`, and
 passes each hook the name its matcher uses. The wiring `install.sh` writes

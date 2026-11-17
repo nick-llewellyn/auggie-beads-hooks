@@ -627,7 +627,6 @@ for FIRED in "bd -C $OUT close CHR-1" "b''d -C $OUT close CHR-1" \
   grep -qF "push $OUT" "$BD_LOG.dirs" 2>/dev/null && report ok ||
     report bad "its -C target must be synced when no root has a store: $FIRED"
 done
-rm -rf "$OUT"
 # A command of several lines is scanned even so: bash runs the lines before one
 # it refuses, so `./run` has run when `echo )))` fails, and the warning that the
 # rest could not be read still stands.
@@ -637,6 +636,16 @@ scanned && report ok ||
   report bad "a command of several lines must be scanned when no root has a store"
 grep -q "could not be resolved" "$WS/out" && report ok ||
   report bad "a command of several lines must keep its warning when no root has a store (out: $(cat "$WS/out"))"
+# zsh, which Auggie CLI 1.2.0 runs commands in on macOS, expands `b(d|x)` to
+# `bd` where that file exists, in a line bash refuses: it is scanned too, and
+# keeps the warning that it could not be read.
+: >"$WS/spy.log"
+event "$WS/bin/b(d|x) -C $OUT close CHR-1" | "$BASH_UNDER_TEST" "$HOOK" >"$WS/out" 2>/dev/null
+scanned && report ok ||
+  report bad "a command holding a parenthesis must be scanned when no root has a store"
+grep -q "could not be resolved" "$WS/out" && report ok ||
+  report bad "a command holding a parenthesis must keep its warning when no root has a store (out: $(cat "$WS/out"))"
+rm -rf "$OUT"
 teardown
 
 # A root with a store has every command scanned, as before.

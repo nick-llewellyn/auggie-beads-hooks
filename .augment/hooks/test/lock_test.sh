@@ -589,6 +589,75 @@ grep -q "push $WS" "$BD_LOG.dirs" && report ok ||
 rm -rf "$OUT"
 teardown
 
+# --- no store in the roots: only what may run bd is scanned ------------
+# Wired user-level, the hook runs in workspaces with no bead store, where the
+# scan is most of what it costs. A `python3` that notes each run stands in
+# front of the real one, so a scan shows whether or not it finds a write.
+spy_python() {
+  local real
+  real=$(PATH="$ORIG_PATH" command -v python3)
+  mkdir -p "$WS/spy"
+  printf '#!/bin/sh\necho ran >>"%s"\nexec "%s" "$@"\n' "$WS/spy.log" "$real" \
+    >"$WS/spy/python3"
+  chmod +x "$WS/spy/python3"
+  : >"$WS/spy.log"
+  PATH="$WS/spy:$PATH"
+}
+scanned() { [ -s "$WS/spy.log" ]; }
+
+setup
+rm -rf "$WS/.beads"
+spy_python
+fire 'ls -la && git status'
+! scanned && report ok ||
+  report bad "a command the text test passes must not be scanned when no root has a store"
+[ ! -s "$BD_LOG" ] && report ok ||
+  report bad "a command the text test passes must not sync when no root has a store (bd: $(tr '\n' ',' <"$BD_LOG"))"
+# A store written elsewhere is still found, however `bd` is spelled, even one
+# that `env -S` decodes.
+OUT=$(mktemp -d)
+mkdir -p "$OUT/.beads"
+for FIRED in "bd -C $OUT close CHR-1" "b''d -C $OUT close CHR-1" \
+  "env -S'sh -c \"b\\\\\\nd -C $OUT close CHR-1\"'"; do
+  : >"$WS/spy.log"
+  rm -f "$BD_LOG.dirs"
+  fire "$FIRED"
+  scanned && report ok ||
+    report bad "a command that may run bd must be scanned when no root has a store: $FIRED"
+  grep -qF "push $OUT" "$BD_LOG.dirs" 2>/dev/null && report ok ||
+    report bad "its -C target must be synced when no root has a store: $FIRED"
+done
+# A command of several lines is scanned even so: bash runs the lines before one
+# it refuses, so `./run` has run when `echo )))` fails, and the warning that the
+# rest could not be read still stands.
+: >"$WS/spy.log"
+event "$(printf './run\necho )))')" | "$BASH_UNDER_TEST" "$HOOK" >"$WS/out" 2>/dev/null
+scanned && report ok ||
+  report bad "a command of several lines must be scanned when no root has a store"
+grep -q "could not be resolved" "$WS/out" && report ok ||
+  report bad "a command of several lines must keep its warning when no root has a store (out: $(cat "$WS/out"))"
+# zsh, which Auggie CLI 1.2.0 runs commands in on macOS, expands `b(d|x)` to
+# `bd` where that file exists, in a line bash refuses: it is scanned too, and
+# keeps the warning that it could not be read.
+: >"$WS/spy.log"
+event "$WS/bin/b(d|x) -C $OUT close CHR-1" | "$BASH_UNDER_TEST" "$HOOK" >"$WS/out" 2>/dev/null
+scanned && report ok ||
+  report bad "a command holding a parenthesis must be scanned when no root has a store"
+grep -q "could not be resolved" "$WS/out" && report ok ||
+  report bad "a command holding a parenthesis must keep its warning when no root has a store (out: $(cat "$WS/out"))"
+rm -rf "$OUT"
+teardown
+
+# A root with a store has every command scanned, as before.
+setup
+spy_python
+fire 'ls -la'
+scanned && report ok ||
+  report bad "a command must still be scanned when a root has a store"
+[ "$(count push)" -eq 0 ] && report ok ||
+  report bad "a command that writes nothing must still not sync when a root has a store"
+teardown
+
 # --- a quoted `-C` target is recognised --------------------------------
 setup
 OUT=$(mktemp -d)
@@ -2022,6 +2091,38 @@ grep -qF "push $NLROOT" "$BD_LOG.dirs" && report ok ||
 [ "$(count push)" -eq 1 ] && report ok ||
   report bad "a root holding a newline must be one root (pushes: $(count push))"
 rm -rf "$NLWS"
+teardown
+
+# --- an event field's NUL or trailing newlines move no other field ------
+# The hook reads the event's fields in one `jq`, each ended by a NUL, with a NUL
+# inside a field removed and trailing newlines stripped, as the `$(jq -r ...)`
+# that read each field before did. A NUL left in a field splits it and shifts
+# every field after it, the roots among them; trailing newlines left on the
+# tool or event name make it one the hook does not recognise. Each event names
+# a second root with a store after the scratch one, so both must sync, or, for
+# a read-only command, neither. A name the hook does not recognise as an event
+# syncs every root, which is why that case runs `bd list`.
+setup
+TWO=$(mktemp -d)
+mkdir -p "$TWO/.beads"
+while IFS='|' read -r WANT FIRED EDIT; do
+  rm -f "$BD_LOG.dirs"
+  event "$FIRED" "$TWO" | jq "$EDIT" | "$BASH_UNDER_TEST" "$HOOK" >/dev/null 2>&1
+  if [ "$WANT" = both ]; then
+    grep -qF "push $WS" "$BD_LOG.dirs" 2>/dev/null &&
+      grep -qF "push $TWO" "$BD_LOG.dirs" && report ok ||
+      report bad "$EDIT with $FIRED must sync both roots (dirs: $({ tr '\n' ',' <"$BD_LOG.dirs"; } 2>/dev/null))"
+  else
+    [ ! -s "$BD_LOG.dirs" ] && report ok ||
+      report bad "$EDIT with $FIRED must sync nothing (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
+  fi
+done <<'CASES'
+both|bd close CHR-1|.conversation_id = "a\u0000b"
+both|bd close CHR-1|.tool_input.command = "bd list\u0000 && bd close CHR-1"
+both|bd close CHR-1|.tool_name += "\n"
+none|bd list|.hook_event_name += "\n\n"
+CASES
+rm -rf "$TWO"
 teardown
 
 # --- a scanner that fails is not a command that writes nothing ----------

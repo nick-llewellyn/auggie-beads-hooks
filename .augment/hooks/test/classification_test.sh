@@ -44,6 +44,24 @@ mkdir -p "$STORE/.beads" "$STORE/sub/deeper"
 # A second, to assert that the walk stops at the nearest rather than the first.
 mkdir -p "$STORE/nested/inner/.beads"
 
+# The hook skips the scan where scan_may_run_bd says a command's text gives the
+# scan nothing to find, so that must never be said of a command the scan finds
+# reaching a store, a line it cannot read and so counts as an unresolved write
+# among them: zsh runs `b(d|x)`, which bash refuses. Every scan below is
+# checked, and the last case reports each command the check failed. Recorded
+# in files, as `check` scans in a subshell.
+_SUITE_SCAN=$(declare -f scan_command)
+eval "_suite_scan_command${_SUITE_SCAN#scan_command}"
+scan_command() {
+  _suite_scan_command "$@"
+  if [ "$SCAN_MUTATES" -eq 1 ] || [ "$SCAN_UNRESOLVED" -gt 0 ] ||
+    [ "${#SCAN_TARGETS[@]}" -gt 0 ] || [ "${#SCAN_ASYNC[@]}" -gt 0 ]; then
+    printf . >>"$CD/scans-reaching"
+    scan_may_run_bd "$1" || printf '%s\0' "$1" >>"$CD/scans-skipped"
+  fi
+  return 0
+}
+
 classify() {
   scan_command "$1" "$BASE"
   [ "$SCAN_MUTATES" -eq 1 ] && echo sync || echo skip
@@ -1421,6 +1439,13 @@ check_target '/tmp/a b' 'env -S "bd -C '"'"'/tmp/a b'"'"' close CHR-1"'
 check_target '/tmp/a b' 'env -S '"'"'bd -C "/tmp/a b" close CHR-1'"'"''
 check_target "/tmp/a'b" 'env -S "bd -C '"'"'/tmp/a\\'"'"'b'"'"' close CHR-1"'
 check_target '/tmp/a#b' 'env -S "bd -C /tmp/a\\#b close CHR-1"'
+# A string attached to `-S`, a bundle or `--split-string=`, or split by `\_`,
+# can spell `bd` only once decoded: `\\\n` in double quotes is a backslash and
+# a newline, which the shell that runs the string joins.
+check_target '/tmp/store' 'env -S'"'"'sh -c "b\\\nd -C /tmp/store close CHR-1"'"'"''
+check_target '/tmp/store' 'env --split-string='"'"'sh -c "b\\\nd -C /tmp/store close CHR-1"'"'"''
+check_target '/tmp/store' 'env -iS'"'"'sh -c "b\\\nd -C /tmp/store close CHR-1"'"'"''
+check_target '/tmp/store' 'env -S'"'"'sh\_-c\_"b\\\nd\_-C\_/tmp/store\_close\_CHR-1"'"'"''
 # An escape `env` does not know, or an unclosed quote, is an error on which
 # it runs nothing.
 check skip 'env -S "bd -C /tmp/store close CHR-1 \\q"'
@@ -2605,6 +2630,12 @@ check_target '/tmp/store' 'echo é ; bd -C /tmp/store close CHR-1 ))))'
 # What is cut off counts as a script that cannot be read, so a stray closer
 # warns even with no write before it.
 check_unresolved 'echo é ; )'
+# zsh expands `b(d|x)` to `bd` where that file exists, a glob in a line bash
+# refuses, so the line can run a write the scan cannot read.
+check_unresolved '/usr/local/bin/b(d|x) -C /tmp/store close CHR-1'
+# Several lines run up to the one the shell refuses, so `./run` has run, and
+# may have written a store, by the time `echo )))` fails.
+check_unresolved $'./run\necho )))'
 check_unresolved 'echo )))'
 check skip ''
 check skip '   '
@@ -3645,6 +3676,100 @@ OTHERS=$(printf 'cs_u%d() { :; }; ' $(seq 1 8000))
 BODIES=$(printf 'true && cs_f() { :; }; %.0s' $(seq 1 300))
 CALLS=$(printf 'cs_f; %.0s' $(seq 1 40))
 check_target_in_time '/tmp/store' "$OTHERS$BODIES${CALLS}bd -C /tmp/store close CHR-1"
+
+# --- commands the hook need not scan -------------------------------------
+# Where no workspace root has a store, the hook scans only a command whose text
+# might run a `bd`. Asserts what scan_may_run_bd says of command $2: `scan`
+# where its text might run a `bd`, `skip` where it gives the scan nothing to
+# find.
+check_may_run() {
+  local want="$1" command="$2" got=skip
+  scan_may_run_bd "$command" && got=scan
+  if [ "$got" = "$want" ]; then
+    PASS=$((PASS + 1))
+  else
+    FAIL=$((FAIL + 1))
+    printf 'FAIL want=%-4s got=%-4s may run bd: %s\n' "$want" "$got" "$command"
+  fi
+}
+check_may_run skip 'ls -la && git status'
+check_may_run skip 'npm test'
+check_may_run skip 'git commit -m "add the parser"'
+check_may_run skip 'cd /tmp/x && make'
+check_may_run skip './script.sh'
+check_may_run skip 'cd ..'
+check_may_run skip 'shfmt -d hook.sh'
+check_may_run skip 'npm run db'
+check_may_run skip 'X=sh ls'
+check_may_run skip 'evaluate x'
+# A `bd` in either case, however quoted, escaped or split across lines.
+check_may_run scan 'bd list'
+check_may_run scan 'BD close CHR-1'
+check_may_run scan "b''d close CHR-1"
+check_may_run scan 'b\d close CHR-1'
+check_may_run scan '"b"d close CHR-1'
+check_may_run scan "$(printf 'b\\\nd close CHR-1')"
+check_may_run scan "$(printf 'ls \377 bd close CHR-1')"
+check_may_run scan 'cd /tmp/abd'
+# Text through which an expansion, a substitution or a glob could spell one.
+check_may_run scan '$X close CHR-1'
+check_may_run scan '`x` close CHR-1'
+check_may_run scan '{b,}d close CHR-1'
+check_may_run scan 'b? close CHR-1'
+check_may_run scan 'b* close CHR-1'
+check_may_run scan 'b[d] close CHR-1'
+# A parenthesis, as zsh's glob grouping or bash's extglob can spell one with
+# it, and a line bash refuses for a stray closer may be one zsh runs.
+check_may_run scan '/usr/local/bin/b(d|x) -C /tmp/store close CHR-1'
+check_may_run scan 'echo )))'
+check_may_run scan 'echo é ; )'
+check_may_run scan '(cd x && make)'
+check_may_run scan 'git log --format=(x)'
+# A word that runs code the text does not show, with or without a path.
+for RUNNER in eval source . exec command builtin env xargs sh bash zsh dash \
+  ksh mksh busybox; do
+  check_may_run scan "$RUNNER x"
+  check_may_run scan "true;/bin/$RUNNER x"
+done
+# `env -S` decodes escapes into the command it runs, which the text need not
+# spell, nor show a shell beside a word boundary.
+check_may_run scan 'env -S'"'"'sh -c "b\\\nd -C /tmp/store close CHR-1"'"'"''
+check_may_run scan 'env --split-string='"'"'sh -c "b\\\nd -C /tmp/store close CHR-1"'"'"''
+check_may_run scan 'env -iS'"'"'sh -c "b\\\nd -C /tmp/store close CHR-1"'"'"''
+check_may_run scan 'env -S'"'"'sh\_-c\_"b\\\nd\_-C\_/tmp/store\_close\_CHR-1"'"'"''
+check_may_run scan 'env FOO=1 ls'
+# Several lines, as bash runs the lines before one it refuses, and the scan's
+# word on the line it cannot read stands.
+check_may_run scan $'./run\necho )))'
+check_may_run scan $'ls -la\ngit status'
+check_may_run scan "$(printf 'cat <<EOF >notes\nhello\nEOF')"
+check_may_run scan 'e"va"l x'
+check_may_run scan 'ev\al x'
+check_may_run scan "$(printf 'ev\\\nal x')"
+check_may_run scan 'SH x'
+check_may_run scan 'ls | sh'
+check_may_run scan '(sh)'
+check_may_run scan "$(printf 'true\nsh x')"
+check_may_run scan "$(printf 'true\tsh x')"
+# Answered in time however long the text: removing its quotes first took bash
+# 3.2 seconds for a few kilobytes of them.
+QUOTED=$(printf "'a' %.0s" $(seq 1 2000))
+STARTED=$SECONDS
+check_may_run skip "$QUOTED"
+[ $((SECONDS - STARTED)) -le 2 ] && PASS=$((PASS + 1)) || {
+  FAIL=$((FAIL + 1))
+  printf 'FAIL may run bd took %ss for %s bytes\n' $((SECONDS - STARTED)) "${#QUOTED}"
+}
+
+# No command a scan above found reaching a store is one the hook would skip.
+REACHING=$(wc -c <"$CD/scans-reaching" 2>/dev/null | tr -d ' ')
+if [ "${REACHING:-0}" -gt 0 ] && [ ! -s "$CD/scans-skipped" ]; then
+  PASS=$((PASS + 1))
+else
+  FAIL=$((FAIL + 1))
+  printf 'FAIL of %s scans reaching a store, the hook would skip:\n' "${REACHING:-0}"
+  [ -e "$CD/scans-skipped" ] && tr '\0' '\n' <"$CD/scans-skipped" | head -20
+fi
 
 echo "classification: pass=$PASS fail=$FAIL"
 [ "$FAIL" -eq 0 ]

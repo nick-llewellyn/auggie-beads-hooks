@@ -613,10 +613,12 @@ fire 'ls -la && git status'
   report bad "a command that cannot run bd must not be scanned when no root has a store"
 [ ! -s "$BD_LOG" ] && report ok ||
   report bad "a command that cannot run bd must not sync when no root has a store (bd: $(tr '\n' ',' <"$BD_LOG"))"
-# A store written elsewhere is still found, however `bd` is spelled.
+# A store written elsewhere is still found, however `bd` is spelled, even one
+# that `env -S` decodes.
 OUT=$(mktemp -d)
 mkdir -p "$OUT/.beads"
-for FIRED in "bd -C $OUT close CHR-1" "b''d -C $OUT close CHR-1"; do
+for FIRED in "bd -C $OUT close CHR-1" "b''d -C $OUT close CHR-1" \
+  "env -S'sh -c \"b\\\\\\nd -C $OUT close CHR-1\"'"; do
   : >"$WS/spy.log"
   rm -f "$BD_LOG.dirs"
   fire "$FIRED"
@@ -626,6 +628,15 @@ for FIRED in "bd -C $OUT close CHR-1" "b''d -C $OUT close CHR-1"; do
     report bad "its -C target must be synced when no root has a store: $FIRED"
 done
 rm -rf "$OUT"
+# A command of several lines is scanned even so: bash runs the lines before one
+# it refuses, so `./run` has run when `echo )))` fails, and the warning that the
+# rest could not be read still stands.
+: >"$WS/spy.log"
+event "$(printf './run\necho )))')" | "$BASH_UNDER_TEST" "$HOOK" >"$WS/out" 2>/dev/null
+scanned && report ok ||
+  report bad "a command of several lines must be scanned when no root has a store"
+grep -q "could not be resolved" "$WS/out" && report ok ||
+  report bad "a command of several lines must keep its warning when no root has a store (out: $(cat "$WS/out"))"
 teardown
 
 # A root with a store has every command scanned, as before.

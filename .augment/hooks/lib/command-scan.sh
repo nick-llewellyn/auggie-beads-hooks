@@ -101,16 +101,16 @@ scan_command() {
 
 # What scan_may_run_bd looks for, built once, as this file is sourced. A quote
 # or a backslash between two letters leaves them one word -- `b''d` and `b\d`
-# both run `bd` -- and so does a newline after a backslash, which joins the
-# lines, so any run of those may stand between the letters of a name. Letters
-# match in either case, as a case-insensitive filesystem finds the program.
-_SC_JOIN="['\"\\\\"$'\n'"]*"
+# both run `bd` -- so any run of those may stand between the letters of a name.
+# Letters match in either case, as a case-insensitive filesystem finds the
+# program.
+_SC_JOIN="['\"\\\\]*"
 _SC_RUNS_BD="[bB]$_SC_JOIN[dD]"
 _SC_UPPER=ABCDEFGHIJKLMNOPQRSTUVWXYZ
 _SC_LOWER=abcdefghijklmnopqrstuvwxyz
 _SC_NAMES=""
-for _sc_name in eval source . exec command builtin xargs sh bash zsh dash ksh \
-  mksh busybox; do
+for _sc_name in eval source . exec command builtin env xargs sh bash zsh dash \
+  ksh mksh busybox; do
   _sc_re=""
   while [ -n "$_sc_name" ]; do
     _sc_c=${_sc_name:0:1}
@@ -131,13 +131,15 @@ unset _sc_name _sc_re _sc_c _sc_i
 # Whether command $1 might run a `bd`, read from its text alone and without
 # starting a process. The hook asks this before scanning in a workspace with no
 # bead store, where the scan is most of what it costs, so it errs towards yes.
-# It says no only where the text, its quotes, backslashes and joined lines
-# aside, holds no `bd` in either case; none of `$`, a backquote, `{`, `}`, `*`,
-# `?` or `[`, through which an expansion, a substitution or a glob could spell
-# one; and no word, with or without a path, that runs code the text does not
-# show: `eval`, `source`, `.`, `exec`, `command`, `builtin`, `xargs` or a
-# shell. The scan stays the only judge of what a command writes; this only
-# says where it could find nothing.
+# It says no only where the text is one line, as bash runs the lines before
+# one it rejects, so the scan's word on a line it cannot read stands; and,
+# its quotes and backslashes aside, holds no `bd` in either case; none of `$`,
+# a backquote, `{`, `}`, `*`, `?` or `[`, through which an expansion, a
+# substitution or a glob could spell one; and no word, with or without a path,
+# that runs code the text does not show: `eval`, `source`, `.`, `exec`,
+# `command`, `builtin`, `xargs`, a shell, or `env`, whose `-S` decodes escapes
+# into a command. The scan stays the only judge of what a command writes; this
+# only says where it could find nothing.
 #
 # Matched with regexes rather than by removing the quotes first, which bash 3.2
 # does in time that grows with the square of the text: seconds for a few
@@ -146,7 +148,9 @@ unset _sc_name _sc_re _sc_c _sc_i
 scan_may_run_bd() {
   local LC_ALL=C
   case "$1" in
-    *'$'* | *'`'* | *'{'* | *'}'* | *'*'* | *'?'* | *'['*) return 0 ;;
+    *$'\n'* | *'$'* | *'`'* | *'{'* | *'}'* | *'*'* | *'?'* | *'['*)
+      return 0
+      ;;
   esac
   [[ $1 =~ $_SC_RUNS_BD ]]
   [ $? -eq 1 ] || return 0

@@ -46,12 +46,16 @@ mkdir -p "$STORE/nested/inner/.beads"
 
 # The hook skips the scan where scan_may_run_bd says a command's text cannot
 # run a `bd`, so that must never be said of a command the scan finds reaching a
-# store. Two kinds run nothing at all and are let through: text bash refuses,
-# such as `echo )))`, and an `env -S` missing its string, which env refuses.
-# The scan counts both as an unresolved write, as it cannot read them, so the
-# hook warns of them where a root has a store. Every scan below is checked, and
-# the last case reports each command the check failed. Recorded in files, as
-# `check` scans in a subshell.
+# store. One line that bash refuses, such as `echo )))`, runs nothing at all
+# and is let through: the scan counts it as an unresolved write, as it cannot
+# read it, so the hook warns of it where a root has a store. Several lines are
+# not, since bash runs the lines before one it refuses. Every scan below is
+# checked, and the last case reports each command the check failed. Recorded
+# in files, as `check` scans in a subshell.
+refused_line() {
+  case "$1" in *$'\n'*) return 1 ;; esac
+  ! "${BASH:-bash}" -n -c "$1" 2>/dev/null
+}
 _SUITE_SCAN=$(declare -f scan_command)
 eval "_suite_scan_command${_SUITE_SCAN#scan_command}"
 scan_command() {
@@ -59,8 +63,7 @@ scan_command() {
   if [ "$SCAN_MUTATES" -eq 1 ] || [ "$SCAN_UNRESOLVED" -gt 0 ] ||
     [ "${#SCAN_TARGETS[@]}" -gt 0 ] || [ "${#SCAN_ASYNC[@]}" -gt 0 ]; then
     printf . >>"$CD/scans-reaching"
-    if ! scan_may_run_bd "$1" && "${BASH:-bash}" -n -c "$1" 2>/dev/null &&
-      [ "$1" != 'env -S' ]; then
+    if ! scan_may_run_bd "$1" && ! refused_line "$1"; then
       printf '%s\0' "$1" >>"$CD/scans-skipped"
     fi
   fi
@@ -1444,6 +1447,13 @@ check_target '/tmp/a b' 'env -S "bd -C '"'"'/tmp/a b'"'"' close CHR-1"'
 check_target '/tmp/a b' 'env -S '"'"'bd -C "/tmp/a b" close CHR-1'"'"''
 check_target "/tmp/a'b" 'env -S "bd -C '"'"'/tmp/a\\'"'"'b'"'"' close CHR-1"'
 check_target '/tmp/a#b' 'env -S "bd -C /tmp/a\\#b close CHR-1"'
+# A string attached to `-S`, a bundle or `--split-string=`, or split by `\_`,
+# can spell `bd` only once decoded: `\\\n` in double quotes is a backslash and
+# a newline, which the shell that runs the string joins.
+check_target '/tmp/store' 'env -S'"'"'sh -c "b\\\nd -C /tmp/store close CHR-1"'"'"''
+check_target '/tmp/store' 'env --split-string='"'"'sh -c "b\\\nd -C /tmp/store close CHR-1"'"'"''
+check_target '/tmp/store' 'env -iS'"'"'sh -c "b\\\nd -C /tmp/store close CHR-1"'"'"''
+check_target '/tmp/store' 'env -S'"'"'sh\_-c\_"b\\\nd\_-C\_/tmp/store\_close\_CHR-1"'"'"''
 # An escape `env` does not know, or an unclosed quote, is an error on which
 # it runs nothing.
 check skip 'env -S "bd -C /tmp/store close CHR-1 \\q"'
@@ -2628,6 +2638,9 @@ check_target '/tmp/store' 'echo é ; bd -C /tmp/store close CHR-1 ))))'
 # What is cut off counts as a script that cannot be read, so a stray closer
 # warns even with no write before it.
 check_unresolved 'echo é ; )'
+# Several lines run up to the one the shell refuses, so `./run` has run, and
+# may have written a store, by the time `echo )))` fails.
+check_unresolved $'./run\necho )))'
 check_unresolved 'echo )))'
 check skip ''
 check skip '   '
@@ -3687,7 +3700,6 @@ check_may_run skip 'ls -la && git status'
 check_may_run skip 'npm test'
 check_may_run skip 'git commit -m "add the parser"'
 check_may_run skip 'cd /tmp/x && make'
-check_may_run skip "$(printf 'cat <<EOF >notes\nhello\nEOF')"
 check_may_run skip './script.sh'
 check_may_run skip 'cd ..'
 check_may_run skip 'shfmt -d hook.sh'
@@ -3711,11 +3723,23 @@ check_may_run scan 'b? close CHR-1'
 check_may_run scan 'b* close CHR-1'
 check_may_run scan 'b[d] close CHR-1'
 # A word that runs code the text does not show, with or without a path.
-for RUNNER in eval source . exec command builtin xargs sh bash zsh dash ksh \
-  mksh busybox; do
+for RUNNER in eval source . exec command builtin env xargs sh bash zsh dash \
+  ksh mksh busybox; do
   check_may_run scan "$RUNNER x"
   check_may_run scan "true;/bin/$RUNNER x"
 done
+# `env -S` decodes escapes into the command it runs, which the text need not
+# spell, nor show a shell beside a word boundary.
+check_may_run scan 'env -S'"'"'sh -c "b\\\nd -C /tmp/store close CHR-1"'"'"''
+check_may_run scan 'env --split-string='"'"'sh -c "b\\\nd -C /tmp/store close CHR-1"'"'"''
+check_may_run scan 'env -iS'"'"'sh -c "b\\\nd -C /tmp/store close CHR-1"'"'"''
+check_may_run scan 'env -S'"'"'sh\_-c\_"b\\\nd\_-C\_/tmp/store\_close\_CHR-1"'"'"''
+check_may_run scan 'env FOO=1 ls'
+# Several lines, as bash runs the lines before one it refuses, and the scan's
+# word on the line it cannot read stands.
+check_may_run scan $'./run\necho )))'
+check_may_run scan $'ls -la\ngit status'
+check_may_run scan "$(printf 'cat <<EOF >notes\nhello\nEOF')"
 check_may_run scan 'e"va"l x'
 check_may_run scan 'ev\al x'
 check_may_run scan "$(printf 'ev\\\nal x')"

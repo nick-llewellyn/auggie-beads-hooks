@@ -91,12 +91,13 @@ sync. A command too deeply nested to scan within a few seconds is treated as
 a failed scan: the workspace roots are synced and the hook warns.
 
 Where no workspace root has a `.beads/`, it first reads the command's text,
-and neither scans nor syncs a command that cannot run `bd`: one that, its
-quotes, backslashes and joined lines aside, holds no `bd` in either case,
-none of `$`, a backquote, `{`, `}`, `*`, `?` or `[`, and no word that runs
-code the text does not show, such as `eval`, `source`, `xargs` or a shell.
-Every other command is scanned, so `bd -C /other/repo close X` run there
-still syncs that store.
+and neither scans nor syncs a command of one line that cannot run `bd`: one
+that, its quotes and backslashes aside, holds no `bd` in either case, none
+of `$`, a backquote, `{`, `}`, `*`, `?` or `[`, and no word that runs code
+the text does not show, such as `eval`, `source`, `env`, `xargs` or a
+shell. Every other command is scanned, so `bd -C /other/repo close X` run
+there still syncs that store. A command of several lines is always scanned,
+as bash runs the lines before one it refuses.
 
 Auggie CLI 1.2.0 renamed the shell tool from `launch-process` to `bash`, and
 passes each hook the name its matcher uses. The wiring `install.sh` writes
@@ -182,8 +183,8 @@ On Auggie CLI before 1.2.0, change the PostToolUse matcher to
 
 Auggie runs these hooks in every workspace. In one with no `.beads/`, they
 change nothing unless a command writes a store elsewhere, and the sync hook
-scans only a command that might run `bd`. Any other shell command it lets
-through in a few tens of milliseconds; see
+scans only a command that might run `bd` or has several lines. Any other
+shell command it lets through in a few tens of milliseconds; see
 [PostToolUse and SessionEnd](#posttooluse-and-sessionend-beads-syncsh).
 
 Keep no other wiring of the hooks: Auggie runs every matching hook from

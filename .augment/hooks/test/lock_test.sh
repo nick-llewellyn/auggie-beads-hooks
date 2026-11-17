@@ -589,6 +589,55 @@ grep -q "push $WS" "$BD_LOG.dirs" && report ok ||
 rm -rf "$OUT"
 teardown
 
+# --- no store in the roots: only what may run bd is scanned ------------
+# Wired user-level, the hook runs in workspaces with no bead store, where the
+# scan is most of what it costs. A `python3` that notes each run stands in
+# front of the real one, so a scan shows whether or not it finds a write.
+spy_python() {
+  local real
+  real=$(PATH="$ORIG_PATH" command -v python3)
+  mkdir -p "$WS/spy"
+  printf '#!/bin/sh\necho ran >>"%s"\nexec "%s" "$@"\n' "$WS/spy.log" "$real" \
+    >"$WS/spy/python3"
+  chmod +x "$WS/spy/python3"
+  : >"$WS/spy.log"
+  PATH="$WS/spy:$PATH"
+}
+scanned() { [ -s "$WS/spy.log" ]; }
+
+setup
+rm -rf "$WS/.beads"
+spy_python
+fire 'ls -la && git status'
+! scanned && report ok ||
+  report bad "a command that cannot run bd must not be scanned when no root has a store"
+[ ! -s "$BD_LOG" ] && report ok ||
+  report bad "a command that cannot run bd must not sync when no root has a store (bd: $(tr '\n' ',' <"$BD_LOG"))"
+# A store written elsewhere is still found, however `bd` is spelled.
+OUT=$(mktemp -d)
+mkdir -p "$OUT/.beads"
+for FIRED in "bd -C $OUT close CHR-1" "b''d -C $OUT close CHR-1"; do
+  : >"$WS/spy.log"
+  rm -f "$BD_LOG.dirs"
+  fire "$FIRED"
+  scanned && report ok ||
+    report bad "a command that may run bd must be scanned when no root has a store: $FIRED"
+  grep -qF "push $OUT" "$BD_LOG.dirs" 2>/dev/null && report ok ||
+    report bad "its -C target must be synced when no root has a store: $FIRED"
+done
+rm -rf "$OUT"
+teardown
+
+# A root with a store has every command scanned, as before.
+setup
+spy_python
+fire 'ls -la'
+scanned && report ok ||
+  report bad "a command must still be scanned when a root has a store"
+[ "$(count push)" -eq 0 ] && report ok ||
+  report bad "a command that writes nothing must still not sync when a root has a store"
+teardown
+
 # --- a quoted `-C` target is recognised --------------------------------
 setup
 OUT=$(mktemp -d)

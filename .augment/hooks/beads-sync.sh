@@ -51,7 +51,43 @@ warn() {
   fi
 }
 
-EVENT_NAME=$(jq -r '.hook_event_name // ""' <<<"$EVENT_JSON")
+# The event's fields, read by one `jq` rather than one each: Auggie waits for
+# this hook after every shell command, and each `jq` takes milliseconds to
+# start. Each field is what `$(jq -r ...)` made of it: empty where it is
+# absent, false, null or cannot be read, a value that is not a string as its
+# JSON, and without the NUL bytes and trailing newlines a command substitution
+# drops. The workspace roots follow, each ended by its NUL; see the loop that
+# reads them. `jq` appends the delimiter itself rather than `--raw-output0`,
+# which needs jq 1.7 and would fail on the 1.6 still shipped by several
+# distributions.
+EVENT_NAME=""
+CONVERSATION_ID=""
+TOOL_NAME=""
+COMMAND=""
+LAUNCH_CWD=""
+WAIT_MODE=""
+EVENT_ROOTS=()
+FIELD_INDEX=0
+while IFS= read -r -d '' FIELD; do
+  case "$FIELD_INDEX" in
+    0) EVENT_NAME=$FIELD ;;
+    1) CONVERSATION_ID=$FIELD ;;
+    2) TOOL_NAME=$FIELD ;;
+    3) COMMAND=$FIELD ;;
+    4) LAUNCH_CWD=$FIELD ;;
+    5) WAIT_MODE=$FIELD ;;
+    *) EVENT_ROOTS+=("$FIELD") ;;
+  esac
+  FIELD_INDEX=$((FIELD_INDEX + 1))
+done < <(jq -j '
+  def field(f): (try (f // "") catch "")
+    | (if type == "string" then . else tojson end)
+    | split("\u0000") | join("") | sub("\n+\\z"; "") + "\u0000";
+  field(.hook_event_name), field(.conversation_id), field(.tool_name),
+  field(.tool_input.command), field(.tool_input.cwd // .cwd),
+  field(if (.tool_input.wait | tostring) == "false" or
+    .tool_input.background == true then "unwaited" else "" end),
+  (.workspace_roots[]? // empty | . + "\u0000")' <<<"$EVENT_JSON")
 
 # Every root with a bead store is synced, not just the first. The event
 # supplies an array, and `bd -C <dir>` can address any of them, so picking
@@ -444,18 +480,15 @@ take_guard_waiting() {
   return 1
 }
 
-# Read NUL-delimited for the reason the scanner and the registry are: a root
-# path may contain a newline, and by line such a root arrives as two paths that
-# name nothing. Neither has a `.beads`, so `add_root` drops both and the real
-# workspace store is left out of the push set entirely -- SessionEnd builds its
-# list the same way, so nothing later recovers it.
-#
-# `jq` appends the delimiter itself rather than `--raw-output0`, which needs
-# jq 1.7 and would fail on the 1.6 still shipped by several distributions.
-while IFS= read -r -d '' ROOT; do
+# The roots were read NUL-delimited, for the reason the scanner and the registry
+# are: a root path may contain a newline, and by line such a root arrives as two
+# paths that name nothing. Neither has a `.beads`, so `add_root` drops both and
+# the real workspace store is left out of the push set entirely -- SessionEnd
+# builds its list the same way, so nothing later recovers it.
+for ROOT in ${EVENT_ROOTS[@]:+"${EVENT_ROOTS[@]}"}; do
   add_root "$ROOT"
   [ -d "$ROOT/.beads" ] && WS_ROOTS+=("$ROOT")
-done < <(jq -j '.workspace_roots[]? // empty | . + "\u0000"' <<<"$EVENT_JSON")
+done
 
 # An external `-C` target is named by one command and by nothing else: no
 # later event mentions it, and the root list every invocation builds comes
@@ -808,7 +841,6 @@ prune_registry() {
 #
 # A write still running when its session ends is not waited for, as nothing
 # runs after that SessionEnd to find it.
-CONVERSATION_ID=$(jq -r '.conversation_id // ""' <<<"$EVENT_JSON")
 ASYNC_LISTS=()
 for ROOT in ${WS_ROOTS[@]:+"${WS_ROOTS[@]}"}; do
   ASYNC_LISTS+=("$ROOT/.beads/.augment-sync.async")
@@ -1019,21 +1051,32 @@ if [ "$EVENT_NAME" = "PostToolUse" ]; then
   # Auggie CLI 1.2.0 renamed the shell tool from `launch-process` to `bash`,
   # and hands each hook the name its matcher uses. A copy whose settings still
   # match the old name, which 1.x matches for now, receives that one.
-  TOOL_NAME=$(jq -r '.tool_name // ""' <<<"$EVENT_JSON")
   case "$TOOL_NAME" in
     bash | launch-process) ;;
     *) exit 0 ;;
   esac
 
-  COMMAND=$(jq -r '.tool_input.command // ""' <<<"$EVENT_JSON")
-  # The directory the tool call was launched from, and empty when the event does
-  # not say. The field is optional, and the hook's own cwd is not a substitute
-  # for it: nothing requires this process to run where the tool call did, so
-  # resolving `bd -C store` against it names a store under some unrelated
-  # directory. That store is then recorded and pushed while the one the command
-  # actually opened is in neither the push set nor the registry -- so even
-  # SessionEnd cannot recover it, an external target being named by that command
-  # and nothing else.
+  # Wired user-level, as `install.sh --wire` wires it, the hook runs in
+  # workspaces with no bead store too. One has nothing to sync but a store a
+  # command writes elsewhere -- `bd -C /other/repo close X` -- which only the
+  # scan can find, and the scan is most of what this hook costs, after every
+  # shell command, with Auggie waiting. So it is skipped where the command's
+  # text cannot run a `bd` at all; see `scan_may_run_bd`. Nothing can be
+  # outstanding in such a workspace either, every record of an owed sync being
+  # kept in a root's `.beads`.
+  if [ "${#ROOTS[@]}" -eq 0 ] && ! any_outstanding &&
+    ! scan_may_run_bd "$COMMAND"; then
+    exit 0
+  fi
+
+  # `LAUNCH_CWD` is the directory the tool call was launched from, and empty
+  # when the event does not say. The field is optional, and the hook's own cwd
+  # is not a substitute for it: nothing requires this process to run where the
+  # tool call did, so resolving `bd -C store` against it names a store under
+  # some unrelated directory. That store is then recorded and pushed while the
+  # one the command actually opened is in neither the push set nor the
+  # registry -- so even SessionEnd cannot recover it, an external target being
+  # named by that command and nothing else.
   #
   # Passed through empty instead, which the scanner reads as an unknown cwd: a
   # relative target stays unresolved and the write still counts, so the roots
@@ -1043,17 +1086,13 @@ if [ "$EVENT_NAME" = "PostToolUse" ]; then
   # none there, as the event's top-level `cwd`. Read only from the first, a 1.x
   # event read as naming no directory, and a plain `bd` write was unresolved.
   # Where both are present, `tool_input.cwd` is the tool call's own.
-  LAUNCH_CWD=$(jq -r '.tool_input.cwd // .cwd // ""' <<<"$EVENT_JSON")
-
-  # A launch with `wait: false` returns as its command starts, so any write
-  # in it may land after this sync, as one behind `&` may: `sleep 6; bd -C
-  # /ext close X` launched so was synced and settled before it wrote. Its
-  # stores are recorded for SessionEnd instead; see `remember_async`. Auggie
-  # 1.x marks such a call with `background: true` in place of `wait: false`,
-  # and fires PostToolUse as its job starts.
-  WAIT_MODE=$(jq -r 'if (.tool_input.wait | tostring) == "false" or
-    .tool_input.background == true
-    then "unwaited" else "" end' <<<"$EVENT_JSON")
+  #
+  # `WAIT_MODE` is `unwaited` for a launch with `wait: false`, which returns as
+  # its command starts, so any write in it may land after this sync, as one
+  # behind `&` may: `sleep 6; bd -C /ext close X` launched so was synced and
+  # settled before it wrote. Its stores are recorded for SessionEnd instead;
+  # see `remember_async`. Auggie 1.x marks such a call with `background: true`
+  # in place of `wait: false`, and fires PostToolUse as its job starts.
 
   # Every `bd` in the command is examined rather than stopping at the first,
   # because each may name a different store via `-C`. A read-only one does

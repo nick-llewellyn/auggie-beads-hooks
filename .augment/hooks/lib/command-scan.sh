@@ -9,7 +9,9 @@
 # The decision itself is in command_scan.py, over the syntax tree `shfmt
 # --to-json` produces. This file is the bash contract around it: scan_command
 # sets SCAN_MUTATES, SCAN_UNRESOLVED, SCAN_TARGETS, SCAN_ASYNC and SCAN_FAILED,
-# which is what the hook and the suite are written against. Both `shfmt` and
+# which is what the hook and the suite are written against, and
+# scan_may_run_bd says, from a command's text alone, whether a scan could find
+# anything in it at all. Both `shfmt` and
 # `python3` are required; a missing one is a broken install rather than a case
 # to degrade through, and standing down quietly would leave bead writes local
 # with nothing to say so.
@@ -95,4 +97,60 @@ scan_command() {
     SCAN_ASYNC=()
   fi
   return 0
+}
+
+# What scan_may_run_bd looks for, built once, as this file is sourced. A quote
+# or a backslash between two letters leaves them one word -- `b''d` and `b\d`
+# both run `bd` -- and so does a newline after a backslash, which joins the
+# lines, so any run of those may stand between the letters of a name. Letters
+# match in either case, as a case-insensitive filesystem finds the program.
+_SC_JOIN="['\"\\\\"$'\n'"]*"
+_SC_RUNS_BD="[bB]$_SC_JOIN[dD]"
+_SC_UPPER=ABCDEFGHIJKLMNOPQRSTUVWXYZ
+_SC_LOWER=abcdefghijklmnopqrstuvwxyz
+_SC_NAMES=""
+for _sc_name in eval source . exec command builtin xargs sh bash zsh dash ksh \
+  mksh busybox; do
+  _sc_re=""
+  while [ -n "$_sc_name" ]; do
+    _sc_c=${_sc_name:0:1}
+    _sc_name=${_sc_name:1}
+    if [ "$_sc_c" = . ]; then
+      _sc_c='\.'
+    else
+      _sc_i=${_SC_LOWER%%"$_sc_c"*}
+      _sc_c="[$_sc_c${_SC_UPPER:${#_sc_i}:1}]"
+    fi
+    _sc_re="$_sc_re$_SC_JOIN$_sc_c"
+  done
+  _SC_NAMES="${_SC_NAMES:+$_SC_NAMES|}$_sc_re$_SC_JOIN"
+done
+_SC_RUNS_WORD="(^|[[:space:];&|()<>/])($_SC_NAMES)([[:space:];&|()<>]|\$)"
+unset _sc_name _sc_re _sc_c _sc_i
+
+# Whether command $1 might run a `bd`, read from its text alone and without
+# starting a process. The hook asks this before scanning in a workspace with no
+# bead store, where the scan is most of what it costs, so it errs towards yes.
+# It says no only where the text, its quotes, backslashes and joined lines
+# aside, holds no `bd` in either case; none of `$`, a backquote, `{`, `}`, `*`,
+# `?` or `[`, through which an expansion, a substitution or a glob could spell
+# one; and no word, with or without a path, that runs code the text does not
+# show: `eval`, `source`, `.`, `exec`, `command`, `builtin`, `xargs` or a
+# shell. The scan stays the only judge of what a command writes; this only
+# says where it could find nothing.
+#
+# Matched with regexes rather than by removing the quotes first, which bash 3.2
+# does in time that grows with the square of the text: seconds for a few
+# kilobytes of quotes. Read bytewise, so a command that is not valid UTF-8
+# still matches, and a match that fails outright counts as a yes.
+scan_may_run_bd() {
+  local LC_ALL=C
+  case "$1" in
+    *'$'* | *'`'* | *'{'* | *'}'* | *'*'* | *'?'* | *'['*) return 0 ;;
+  esac
+  [[ $1 =~ $_SC_RUNS_BD ]]
+  [ $? -eq 1 ] || return 0
+  [[ $1 =~ $_SC_RUNS_WORD ]]
+  [ $? -eq 1 ] || return 0
+  return 1
 }

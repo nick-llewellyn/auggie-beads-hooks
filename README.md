@@ -90,14 +90,17 @@ as `env`, `xargs` and `bash -c`, and resolving symlinks as `bd`, `cd` and
 sync. A command too deeply nested to scan within a few seconds is treated as
 a failed scan: the workspace roots are synced and the hook warns.
 
-Where no workspace root has a `.beads/`, it first reads the command's text,
-and neither scans nor syncs a command of one line that cannot run `bd`: one
-that, its quotes and backslashes aside, holds no `bd` in either case, none
-of `$`, a backquote, `{`, `}`, `*`, `?` or `[`, and no word that runs code
-the text does not show, such as `eval`, `source`, `env`, `xargs` or a
-shell. Every other command is scanned, so `bd -C /other/repo close X` run
-there still syncs that store. A command of several lines is always scanned,
-as bash runs the lines before one it refuses.
+Where no workspace root has a `.beads/`, it first tests the command's text,
+and neither scans nor syncs a command of one line whose text gives the scan
+nothing to find: one that, its quotes and backslashes aside, holds no `bd`
+in either case, none of `$`, a backquote, `{`, `}`, `*`, `?` or `[`, and no
+word that runs code the text does not show, such as `eval`, `source`, `env`,
+`xargs` or a shell. This tests the text, not what the command does: a script
+or program the command runs, such as `./script.sh`, can still run `bd`
+without the test or the scan seeing it; see [Limitations](#limitations).
+Every other command is scanned, so `bd -C /other/repo close X` run there
+still syncs that store. A command of several lines is always scanned, as
+bash runs the lines before one it refuses.
 
 Auggie CLI 1.2.0 renamed the shell tool from `launch-process` to `bash`, and
 passes each hook the name its matcher uses. The wiring `install.sh` writes
@@ -459,6 +462,12 @@ Each leg takes 8 to 10 minutes, which is what the path filter is for.
   known only at run time before `--`, as in `bd close "$ID"`, which may be
   an option such as `--db=<path>`; a plain `bd` in a directory the event did
   not report; or script run through `eval`.
+- The hook reads only the command's own text. A `bd` run by a script or
+  program the command starts, such as `./script.sh`, `make` or `npm test`,
+  is not seen, whether or not the workspace has a store. A write to a
+  workspace root's store is still synced at SessionEnd at the latest; a
+  write to any other store stays unsynced, so run `bd dolt commit` there,
+  and `bd dolt push --remote origin` where the store pushes, by hand.
 - Auggie CLI 1.2.0 was seen running shell commands in zsh on macOS, where
   zsh is the default login shell, while the scanner reads every command
   with bash's rules

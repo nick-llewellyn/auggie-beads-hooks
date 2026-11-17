@@ -1060,10 +1060,11 @@ if [ "$EVENT_NAME" = "PostToolUse" ]; then
   # workspaces with no bead store too. One has nothing to sync but a store a
   # command writes elsewhere -- `bd -C /other/repo close X` -- which only the
   # scan can find, and the scan is most of what this hook costs, after every
-  # shell command, with Auggie waiting. So it is skipped where the command's
-  # text cannot run a `bd` at all; see `scan_may_run_bd`. Nothing can be
-  # outstanding in such a workspace either, every record of an owed sync being
-  # kept in a root's `.beads`.
+  # shell command, with Auggie waiting. So it is skipped for a command whose
+  # text gives the scan nothing to find, a test of the text alone; see
+  # `scan_may_run_bd`. A script the command launches can still run a `bd`,
+  # which the scan does not see either. Nothing can be outstanding in such a
+  # workspace, every record of an owed sync being kept in a root's `.beads`.
   if [ "${#ROOTS[@]}" -eq 0 ] && ! any_outstanding &&
     ! scan_may_run_bd "$COMMAND"; then
     exit 0

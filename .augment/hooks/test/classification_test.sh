@@ -3685,7 +3685,8 @@ check_target_in_time '/tmp/store' "$OTHERS$BODIES${CALLS}bd -C /tmp/store close 
 # --- commands the hook need not scan -------------------------------------
 # Where no workspace root has a store, the hook scans only a command whose text
 # might run a `bd`. Asserts what scan_may_run_bd says of command $2: `scan`
-# where a `bd` might run, `skip` where none can.
+# where its text might run a `bd`, `skip` where it gives the scan nothing to
+# find.
 check_may_run() {
   local want="$1" command="$2" got=skip
   scan_may_run_bd "$command" && got=scan

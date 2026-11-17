@@ -139,7 +139,8 @@ unset _sc_name _sc_re _sc_c _sc_i
 # that runs code the text does not show: `eval`, `source`, `.`, `exec`,
 # `command`, `builtin`, `xargs`, a shell, or `env`, whose `-S` decodes escapes
 # into a command. The scan stays the only judge of what a command writes; this
-# only says where it could find nothing.
+# only says where it could find nothing. A script or program the command starts
+# can still run a `bd`, which neither reads.
 #
 # Matched with regexes rather than by removing the quotes first, which bash 3.2
 # does in time that grows with the square of the text: seconds for a few

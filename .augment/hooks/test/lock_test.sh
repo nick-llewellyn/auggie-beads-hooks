@@ -610,9 +610,9 @@ rm -rf "$WS/.beads"
 spy_python
 fire 'ls -la && git status'
 ! scanned && report ok ||
-  report bad "a command that cannot run bd must not be scanned when no root has a store"
+  report bad "a command the text test passes must not be scanned when no root has a store"
 [ ! -s "$BD_LOG" ] && report ok ||
-  report bad "a command that cannot run bd must not sync when no root has a store (bd: $(tr '\n' ',' <"$BD_LOG"))"
+  report bad "a command the text test passes must not sync when no root has a store (bd: $(tr '\n' ',' <"$BD_LOG"))"
 # A store written elsewhere is still found, however `bd` is spelled, even one
 # that `env -S` decodes.
 OUT=$(mktemp -d)

@@ -1469,14 +1469,44 @@ def bead_root(start):
 
 
 def nearest_store(path):
-    """The nearest of `path` and its ancestors holding a `.beads`, or None."""
+    """The nearest of `path` and its ancestors holding a store, or None."""
     while True:
-        if os.path.isdir(os.path.join(path, ".beads")):
+        if holds_store(path):
             return path
         parent = os.path.dirname(path)
         if parent == path:
             return None
         path = parent
+
+
+def holds_store(path):
+    """Whether `path` holds a `.beads` that `bd` reads as a project store.
+
+    A `.beads` directory alone is not one: `bd` keeps its global directory at
+    ~/.beads, and walks past that or an empty `.beads` to the next ancestor.
+    Naming either as the store sent the sync to a directory no `bd` writes.
+    The test is bd 1.3.4's `hasBeadsProjectFiles`: `metadata.json` or
+    `config.yaml`, a `dolt/` or `embeddeddolt/` directory, or a `*.db` file
+    that is neither a backup nor `vc.db`, a leading dot included. A `redirect`
+    file counts as well, and is not followed.
+    """
+    beads = os.path.join(path, ".beads")
+    if not os.path.isdir(beads):
+        return False
+    for name in ("metadata.json", "config.yaml"):
+        if os.path.exists(os.path.join(beads, name)):
+            return True
+    for name in ("dolt", "embeddeddolt"):
+        if os.path.isdir(os.path.join(beads, name)):
+            return True
+    if os.path.isfile(os.path.join(beads, "redirect")):
+        return True
+    try:
+        names = os.listdir(beads)
+    except OSError:
+        return False
+    return any(name.endswith(".db") and ".backup" not in name and
+               name != "vc.db" for name in names)
 
 
 def same_dir(one, other):

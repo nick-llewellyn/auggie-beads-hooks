@@ -146,6 +146,33 @@ trap 'exit 143' TERM
 trap 'exit 130' INT
 trap 'exit 129' HUP
 
+# Whether $1 holds a `.beads` that `bd` reads as a project store, by the rule
+# `holds_store` in lib/command_scan.py also applies: bd 1.3.4's
+# `hasBeadsProjectFiles`, plus a `redirect` file, which is not followed. A
+# `.beads` directory alone is none -- `bd` keeps its global directory at
+# ~/.beads -- and syncing one ran `bd dolt commit` where no store was, warning
+# after every command once its marker stood.
+#
+# `*.db` names starting with a dot count too, as Go's glob matches them; bash's
+# does not, so `.*.db` and `.db` are named as well.
+holds_store() {
+  local beads="$1/.beads" db
+  [ -d "$beads" ] || return 1
+  if [ -e "$beads/metadata.json" ] || [ -e "$beads/config.yaml" ] ||
+    [ -d "$beads/dolt" ] || [ -d "$beads/embeddeddolt" ] ||
+    [ -f "$beads/redirect" ]; then
+    return 0
+  fi
+  for db in "$beads"/*.db "$beads"/.*.db "$beads/.db"; do
+    [ -e "$db" ] || [ -L "$db" ] || continue
+    case "${db##*/}" in
+      *.backup* | vc.db) ;;
+      *) return 0 ;;
+    esac
+  done
+  return 1
+}
+
 # Adds $1 to the sync set if it holds a bead store and is not already in it.
 #
 # Every array here is expanded as `${A[@]:+"${A[@]}"}`, which is not an
@@ -156,7 +183,7 @@ trap 'exit 129' HUP
 # under on macOS, rejects as unbound under `set -u` when the array is empty.
 add_root() {
   local candidate="$1" existing
-  [ -n "$candidate" ] && [ -d "$candidate/.beads" ] || return 0
+  [ -n "$candidate" ] && holds_store "$candidate" || return 0
   for existing in ${ROOTS[@]:+"${ROOTS[@]}"}; do
     [ "$existing" = "$candidate" ] && return 0
   done
@@ -487,7 +514,7 @@ take_guard_waiting() {
 # builds its list the same way, so nothing later recovers it.
 for ROOT in ${EVENT_ROOTS[@]:+"${EVENT_ROOTS[@]}"}; do
   add_root "$ROOT"
-  [ -d "$ROOT/.beads" ] && WS_ROOTS+=("$ROOT")
+  holds_store "$ROOT" && WS_ROOTS+=("$ROOT")
 done
 
 # An external `-C` target is named by one command and by nothing else: no
@@ -580,7 +607,7 @@ for_each_registry read_registry
 # such proof: it may be an older one that a concurrent settle is removing.
 remember_external() {
   local candidate="$1" existing status=0
-  [ -n "$REGISTRY" ] && [ -d "$candidate/.beads" ] || return 0
+  [ -n "$REGISTRY" ] && holds_store "$candidate" || return 0
   for existing in ${WS_ROOTS[@]:+"${WS_ROOTS[@]}"}; do
     [ "$existing" = "$candidate" ] && return 0
   done
@@ -684,7 +711,7 @@ mark_registry_owed() {
   local entry
   [ -n "$REGISTRY" ] && [ -r "$REGISTRY" ] || return 0
   while IFS= read -r -d '' entry; do
-    [ -d "$entry/.beads" ] || continue
+    holds_store "$entry" || continue
     : >"$entry/.beads/.augment-sync.pending" 2>/dev/null && continue
     unrecorded "$entry" || continue
     owed_unmarked "$entry" && continue
@@ -817,7 +844,7 @@ forget_external() {
 # store that has been deleted -- or that has had its bead store removed -- has
 # no way to settle and would otherwise be committed by every invocation from
 # here on. Nothing is owed to a store that no longer exists.
-prune_keep() { [ -d "$1/.beads" ]; }
+prune_keep() { holds_store "$1"; }
 prune_registry() {
   for_each_registry filter_registry prune_keep
   return 0
@@ -903,13 +930,13 @@ walk_store() {
 }
 
 # Sets NEAREST to the nearest of directory $1 and its parents, by name, that
-# holds a `.beads`, or to nothing.
+# holds a store, or to nothing.
 NEAREST=
 nearest_store() {
   local dir="$1"
   NEAREST=
   while [ -n "$dir" ]; do
-    if [ -d "$dir/.beads" ]; then
+    if holds_store "$dir"; then
       NEAREST=$dir
       return 0
     fi
@@ -960,7 +987,7 @@ take_async() {
         store=$WALKED
         ;;
     esac
-    if [ -n "$store" ] && [ -d "$store/.beads" ]; then
+    if [ -n "$store" ] && holds_store "$store"; then
       add_root "$store"
       remember_external "$store" && [ "$owner" = "$CONVERSATION_ID" ] && continue
     elif [ "$owner" = "$CONVERSATION_ID" ]; then

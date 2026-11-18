@@ -36,13 +36,24 @@ CD=$(cd "$(mktemp -d "${TMPDIR:-/tmp}/beads-hook-classify-cd.XXXXXX")" && pwd -P
 mkdir -p "$CD/base" "$CD/one/two" "$CD/other"
 trap 'rm -rf "$CD"' EXIT
 
+# Makes each argument a directory holding a bead store. A `.beads` alone is
+# none, to `bd` and so to the scanner, so each is given a `metadata.json`, one
+# of the files `bd` looks for.
+make_store() {
+  local root
+  for root in "$@"; do
+    mkdir -p "$root/.beads" && printf '{}\n' >"$root/.beads/metadata.json"
+  done
+}
+
 # A bead store, and directories below it holding none. `bd` selects its store by
 # walking up from where it runs, so which store a command opens is a question
 # about the filesystem and the cases asserting it need one to read.
 STORE="$CD/repo"
-mkdir -p "$STORE/.beads" "$STORE/sub/deeper"
+make_store "$STORE"
+mkdir -p "$STORE/sub/deeper"
 # A second, to assert that the walk stops at the nearest rather than the first.
-mkdir -p "$STORE/nested/inner/.beads"
+make_store "$STORE/nested/inner"
 
 # The hook skips the scan where scan_may_run_bd says a command's text gives the
 # scan nothing to find, so that must never be said of a command the scan finds
@@ -576,6 +587,39 @@ check_target "$STORE" "cd $STORE && bd -C sub/deeper close CHR-1"
 # No ancestor holding a store is nothing to sync: `bd` fails there, so no write
 # happened and there is nothing to report unresolvable either.
 check_target '' "cd $CD/other && bd close CHR-1"
+# A `.beads` holding no project files is no store, and `bd` walks past it: an
+# empty one, or one shaped like bd's global ~/.beads. Named as the store, it
+# sent the sync to a directory where `bd` finds no project (#45).
+mkdir -p "$STORE/plain/.beads" "$CD/lone/.beads" \
+  "$STORE/global/.beads/eventsData" "$STORE/global/.beads/shared-server/dolt"
+: >"$STORE/global/.beads/machine-id"
+check_target "$STORE" "cd $STORE/plain && bd close CHR-1"
+check_target "$STORE" "cd $STORE/global && bd close CHR-1"
+check_target "$STORE" "bd -C $STORE/plain close CHR-1"
+check_target "$STORE" "bd -C $STORE/global close CHR-1"
+check_target '' "cd $CD/lone && bd close CHR-1"
+# The project files are bd 1.3.4's: each makes a store of its own, with a
+# `redirect` counted too and not followed, and anything else leaves the walk to
+# the store above.
+for MARK in metadata.json config.yaml dolt/ embeddeddolt/ beads.db .beads.db \
+  .db redirect; do
+  KIND="$STORE/with/k-${MARK%/}"
+  mkdir -p "$KIND/.beads"
+  case "$MARK" in
+    */) mkdir "$KIND/.beads/$MARK" ;;
+    *) : >"$KIND/.beads/$MARK" ;;
+  esac
+  check_target "$KIND" "cd $KIND && bd close CHR-1"
+done
+for MARK in vc.db beads.backup.db dolt embeddeddolt redirect/ issues.jsonl; do
+  KIND="$STORE/without/k-${MARK%/}"
+  mkdir -p "$KIND/.beads"
+  case "$MARK" in
+    */) mkdir "$KIND/.beads/$MARK" ;;
+    *) : >"$KIND/.beads/$MARK" ;;
+  esac
+  check_target "$STORE" "cd $KIND && bd close CHR-1"
+done
 # A cwd this scan cannot know leaves the store unknowable, which is counted --
 # the walk from a guessed directory would name one the command never opened.
 check_unresolved 'cd $(pwd); bd close CHR-1'
@@ -996,7 +1040,7 @@ check_target "$CD/one/two/store" "CDPATH=/nonexistent-beads-hook-classify:$CD/on
 check_target "$CD/one/two/store" "CDPATH=$CD/one; pushd two; bd -C store close CHR-1"
 check_target "$CD/one/two/store" "cd $CD; CDPATH=one; cd two; bd -C store close CHR-1"
 check_target "$CD/base/store" "cd $CD; CDPATH=:$CD/one; cd base; bd -C store close CHR-1"
-mkdir -p "$CD/base/two/.beads"
+make_store "$CD/base/two"
 check_target "$CD/base/two" "cd $CD/base; CDPATH=$CD/one; cd ./two; bd close CHR-1"
 check_target "$CD/base/two" "cd $CD/base/two; CDPATH=$CD/one; cd ../two; bd close CHR-1"
 check_target "$CD/base/store" "CDPATH=$CD/one; cd $CD/base; bd -C store close CHR-1"
@@ -1355,7 +1399,7 @@ check_target "$STORE" "sudo -nD$STORE bd -C sub/deeper close CHR-1"
 # A relative `-C` resolves against the cwd in force before the wrapper. Of
 # several in one `env` only the last counts, `env` keeping only that one, but
 # a second wrapper's resolves against the first's.
-mkdir -p "$CD/alt/repo/.beads"
+make_store "$CD/alt/repo"
 check_target "$STORE" "cd $CD && env -C repo bd close CHR-1"
 check_target "$STORE" "cd $CD && env -C $CD/alt -C repo bd close CHR-1"
 check_target "$STORE" "cd $CD && env --chdir=$CD/alt --chdir repo bd close CHR-1"
@@ -1463,7 +1507,7 @@ check_unresolved 'CS_W_STORE=/tmp/store; env -S '"'"'bd -C ${CS_W_STORE} close C
 check_target "$CD/base/store" "cd $CD/base; env -C $CD/other -S 'bd -C \${PWD}/store close CHR-1'"
 # `env` changes directory once, to the last `-C` among all its options -- the
 # string's included -- read from where it started.
-mkdir -p "$CD/sl/launch/repo/.beads" "$CD/sl/other/repo/.beads"
+make_store "$CD/sl/launch/repo" "$CD/sl/other/repo"
 check_target "$CD/sl/launch/repo" "cd $CD/sl/launch; env -C $CD/sl/other -S '-C repo bd close CHR-1'"
 check_target "$CD/sl/launch/repo" "cd $CD/sl/launch; env -C $CD/sl/other --split-string='-C repo bd close CHR-1'"
 check_target "$CD/sl/launch/repo" "cd $CD/sl/launch; env -C $CD/sl/missing -S '-C repo bd close CHR-1'"
@@ -3202,7 +3246,8 @@ check_async "$STORE +$STORE/sub" "(BEADS_DB=$STORE/sub/x.db bd close CHR-1) &"
 check_async "$STORE" "(bd --db $STORE/.beads/beads.db close CHR-1) &"
 # The directory `-C` walks up from is the one `bd` reads, `..` collapsed by
 # name before any link is followed.
-mkdir -p "$CD/wr/.beads" "$CD/wr/sub" "$CD/wr/child"
+make_store "$CD/wr"
+mkdir -p "$CD/wr/sub" "$CD/wr/child"
 ln -s "$CD/wr/child" "$CD/wr/sub/link"
 check_async "$CD/wr +$CD/wr/sub" "(sleep 5; mkdir -p $CD/wr/sub/.beads; bd -C $CD/wr/sub/link/.. close CHR-1) &"
 # A `cd` in the background to a directory not there now may reach one the
@@ -3306,7 +3351,8 @@ check_async "" "bash +m -c 'setsid bd -C $STORE close CHR-1; true'"
 # opens through the link turns on where it points, not on how it is spelled.
 WS_DIR="$CD/ws"
 EXT="$CD/ext"
-mkdir -p "$WS_DIR/.beads" "$EXT/.beads" "$EXT/child"
+make_store "$WS_DIR" "$EXT"
+mkdir -p "$EXT/child"
 ln -s "$EXT/child" "$WS_DIR/link"
 # A plain `cd` collapses `..` by name, so this lands in ws.
 check_target "$WS_DIR" "cd $WS_DIR/link/.. && bd close CHR-1"
@@ -3505,7 +3551,7 @@ check_unresolved "true && set -P; export SHELLOPTS; env -S 'bash -c \"cd $WS_DIR
 # A wrapper's directory with a PWD that cannot be read: the PWD may hold a
 # `..` after a symlink, which `bd` collapses by name, so where it walks up
 # from is unknown, and so is a `..` or a CDPATH entry read from there.
-mkdir -p "$WS_DIR/sibling/.beads" "$EXT/sibling/.beads"
+make_store "$WS_DIR/sibling" "$EXT/sibling"
 check_unresolved "cd $EXT/child; export PWD=\"\$(printf %s $WS_DIR/link)\"; env -C . bash -c 'bd close CHR-1'"
 check_unresolved "cd $EXT/child; export PWD=\"\$(printf %s $WS_DIR/link)\"; env -C . bash -c 'cd ..; bd close CHR-1'"
 check_unresolved "cd $EXT/child; export PWD=\"\$(printf %s $WS_DIR/link)\"; env -C . bd -C .. close CHR-1"
@@ -3520,7 +3566,8 @@ check_unresolved "cd $WS_DIR/link; sudo -D . bash -c 'CDPATH=..; cd sibling; bd 
 # CDPATH entries are tried in the `cd`'s mode: a logical one reads `..` by
 # name, so /ws/link/.. holds `repo` though /ext does not; a physical one
 # moves on to the next entry.
-mkdir -p "$WS_DIR/repo" "$CD/backup/repo" "$CD/backup/.beads"
+mkdir -p "$WS_DIR/repo" "$CD/backup/repo"
+make_store "$CD/backup"
 check_target "$WS_DIR" "cd $CD; CDPATH=$WS_DIR/link/..:$CD/backup; cd repo; bd close CHR-1"
 check_target "$CD/backup" "cd $CD; set -P; CDPATH=$WS_DIR/link/..:$CD/backup; cd repo; bd close CHR-1"
 # A sourced file may change it, so after one the two readings are in doubt.

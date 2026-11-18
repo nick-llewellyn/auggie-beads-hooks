@@ -90,7 +90,10 @@ as `env`, `xargs` and `bash -c`, and resolving symlinks as `bd`, `cd` and
 sync. A command too deeply nested to scan within a few seconds is treated as
 a failed scan: the workspace roots are synced and the hook warns.
 
-Where no workspace root has a `.beads/`, it first tests the command's text,
+Where no workspace root has a bead store, a `.beads/` holding a file `bd`
+looks for (`metadata.json`, `config.yaml`, a `dolt/` or `embeddeddolt/`
+directory, a `*.db` file other than a backup or `vc.db`, or a `redirect`),
+it first tests the command's text,
 and neither scans nor syncs a command of one line whose text gives the scan
 nothing to find: one that, its quotes and backslashes aside, holds no `bd`
 in either case, none of `$`, a backquote, `{`, `}`, `(`, `)`, `*`, `?` or
@@ -109,7 +112,7 @@ matches `bash`; on an older CLI, set the matcher to `launch-process`. The hook
 accepts either name, so wiring whose matcher still says `launch-process`,
 which 1.x matches for now but flags as deprecated, keeps syncing.
 
-On **SessionEnd**, it syncs every workspace root that has a `.beads/`, and
+On **SessionEnd**, it syncs every workspace root that has a bead store, and
 every recorded external store, without looking at any command. This catches
 writes PostToolUse missed.
 
@@ -185,7 +188,7 @@ On Auggie CLI before 1.2.0, change the PostToolUse matcher to
 `launch-process`; see
 [PostToolUse and SessionEnd](#posttooluse-and-sessionend-beads-syncsh).
 
-Auggie runs these hooks in every workspace. In one with no `.beads/`, they
+Auggie runs these hooks in every workspace. In one with no bead store, they
 change nothing unless a command writes a store elsewhere, and the sync hook
 scans only a command that might run `bd` or has several lines. Any other
 shell command it lets through in a few tens of milliseconds; see
@@ -508,7 +511,7 @@ Each leg takes 8 to 10 minutes, which is what the path filter is for.
   1.2.0; see [Limitations](#limitations). Otherwise, check that the session
   runs under the Auggie CLI, that `install.sh --status` shows a current
   release and its three wired entries, and that the workspace has a
-  `.beads/`.
+  bead store, not only a `.beads/` directory.
 - **A sync keeps waiting on a lock**: a lock whose owner has died is
   reclaimed automatically, but a `bd` the hook started keeps the lock until
   it exits. If no `bd` is running, delete `.beads/.augment-sync.lock`.

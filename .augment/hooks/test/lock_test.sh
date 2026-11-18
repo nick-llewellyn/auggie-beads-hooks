@@ -42,11 +42,22 @@ report() {
   fi
 }
 
+# Makes each argument a directory holding a bead store. A `.beads` alone is
+# none, to `bd` and so to the hook, so each is given a `metadata.json`, one of
+# the files `bd` looks for.
+make_store() {
+  local root
+  for root in "$@"; do
+    mkdir -p "$root/.beads" && printf '{}\n' >"$root/.beads/metadata.json"
+  done
+}
+
 # Scratch workspace with a stub `bd` that logs each call and can be made
 # to fail or stall on demand.
 setup() {
   WS=$(mktemp -d)
-  mkdir -p "$WS/.beads" "$WS/bin"
+  make_store "$WS"
+  mkdir -p "$WS/bin"
   cat >"$WS/bin/bd" <<'STUB'
 #!/usr/bin/env bash
 LOG="${BD_LOG:?}"
@@ -524,7 +535,7 @@ teardown
 # --- a second root with a bead store is synced too ---------------------
 setup
 ALT=$(mktemp -d)
-mkdir -p "$ALT/.beads"
+make_store "$ALT"
 fire 'bd close CHR-1' "$ALT"
 grep -q "push $WS" "$BD_LOG.dirs" && report ok ||
   report bad "first root must be pushed (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -542,12 +553,86 @@ fire 'bd close CHR-1' "$ALT"
 rm -rf "$ALT"
 teardown
 
+# --- a `.beads` holding no project files is no store -------------------
+# `bd` walks past a `.beads` that holds none: an empty one, or one shaped like
+# bd's global ~/.beads. Synced as a store, it had `bd dolt commit` run where
+# `bd` finds no project: SessionEnd warned, and the marker that left had every
+# later command retry and warn (#45).
+make_global() {
+  mkdir -p "$1/.beads/eventsData" "$1/.beads/shared-server/dolt" &&
+    : >"$1/.beads/machine-id"
+}
+for SHAPE in empty global; do
+  setup
+  rm -f "$WS/.beads/metadata.json"
+  [ "$SHAPE" = empty ] || make_global "$WS"
+  fire_end
+  [ ! -s "$BD_LOG" ] && report ok ||
+    report bad "SessionEnd must not sync a root whose .beads is $SHAPE (bd: $(tr '\n' ',' <"$BD_LOG"))"
+  : >"$WS/.beads/.augment-sync.pending"
+  : >"$BD_LOG"
+  fire 'ls'
+  [ ! -s "$BD_LOG" ] && report ok ||
+    report bad "a marker in a root whose .beads is $SHAPE must not be retried (bd: $(tr '\n' ',' <"$BD_LOG"))"
+  teardown
+
+  setup
+  OUT=$(mktemp -d)
+  mkdir -p "$OUT/.beads"
+  [ "$SHAPE" = empty ] || make_global "$OUT"
+  for FIRED in "bd -C $OUT close CHR-1" "BEADS_DIR=$OUT/.beads bd close CHR-1"; do
+    rm -f "$BD_LOG.dirs"
+    fire "$FIRED"
+    ! grep -qF "commit $OUT" "$BD_LOG.dirs" 2>/dev/null && report ok ||
+      report bad "a .beads that is $SHAPE must not be synced: $FIRED (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
+  done
+  rm -rf "$OUT"
+  teardown
+done
+
+# --- the project files are bd 1.3.4's ----------------------------------
+# Each makes a store of its own, a `*.db` named with a leading dot included,
+# and a `redirect` counts too without being followed. Anything else leaves the
+# root with no store.
+setup
+rm -f "$WS/.beads/metadata.json"
+KINDS=$(mktemp -d)
+WITH=()
+WITHOUT=()
+for MARK in metadata.json config.yaml dolt/ embeddeddolt/ beads.db .beads.db \
+  .db redirect; do
+  WITH+=("$KINDS/with/k-${MARK%/}")
+done
+for MARK in vc.db beads.backup.db dolt embeddeddolt redirect/ issues.jsonl; do
+  WITHOUT+=("$KINDS/without/k-${MARK%/}")
+done
+for ROOT in "${WITH[@]}" "${WITHOUT[@]}"; do
+  MARK=${ROOT##*/k-}
+  mkdir -p "$ROOT/.beads"
+  case "$ROOT" in
+    */with/k-dolt | */with/k-embeddeddolt | */without/k-redirect)
+      mkdir "$ROOT/.beads/$MARK" ;;
+    *) : >"$ROOT/.beads/$MARK" ;;
+  esac
+done
+fire_end "${WITH[@]}" "${WITHOUT[@]}"
+for ROOT in "${WITH[@]}"; do
+  grep -qxF "commit $ROOT" "$BD_LOG.dirs" 2>/dev/null && report ok ||
+    report bad "a .beads holding ${ROOT##*/k-} must be synced"
+done
+for ROOT in "${WITHOUT[@]}"; do
+  ! grep -qxF "commit $ROOT" "$BD_LOG.dirs" 2>/dev/null && report ok ||
+    report bad "a .beads holding only ${ROOT##*/k-} must not be synced"
+done
+rm -rf "$KINDS"
+teardown
+
 # --- a marker in any root is reason enough to sync ---------------------
 # The write landed in the second root; a later read-only command in the
 # session must still clear it.
 setup
 ALT=$(mktemp -d)
-mkdir -p "$ALT/.beads"
+make_store "$ALT"
 : >"$ALT/.beads/.augment-sync.pending"
 fire 'bd list' "$ALT"
 grep -q "push $ALT" "$BD_LOG.dirs" && report ok ||
@@ -560,7 +645,7 @@ teardown
 # --- one root's held lock does not block the other ---------------------
 setup
 ALT=$(mktemp -d)
-mkdir -p "$ALT/.beads"
+make_store "$ALT"
 sleep 300 &
 HOLDER=$!
 hold_lock "$WS/.beads/.augment-sync.lock" "$HOLDER"
@@ -580,7 +665,7 @@ teardown
 # the write would sit local indefinitely.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 fire "bd -C $OUT close CHR-1"
 grep -q "push $OUT" "$BD_LOG.dirs" && report ok ||
   report bad "a -C target outside the roots must be synced (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -616,7 +701,7 @@ fire 'ls -la && git status'
 # A store written elsewhere is still found, however `bd` is spelled, even one
 # that `env -S` decodes.
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 for FIRED in "bd -C $OUT close CHR-1" "b''d -C $OUT close CHR-1" \
   "env -S'sh -c \"b\\\\\\nd -C $OUT close CHR-1\"'"; do
   : >"$WS/spy.log"
@@ -661,7 +746,7 @@ teardown
 # --- a quoted `-C` target is recognised --------------------------------
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 fire "bd -C \"$OUT\" update CHR-1 --claim"
 grep -q "push $OUT" "$BD_LOG.dirs" && report ok ||
   report bad "a quoted -C target must be synced (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -682,7 +767,7 @@ teardown
 # drag another store into the sync set.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 fire "bd -C $OUT list"
 [ ! -s "$BD_LOG.dirs" ] && report ok ||
   report bad "a read-only -C command must not sync anything (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -694,7 +779,7 @@ teardown
 # each may name a different store.
 setup
 ONE=$(mktemp -d); TWO=$(mktemp -d)
-mkdir -p "$ONE/.beads" "$TWO/.beads"
+make_store "$ONE" "$TWO"
 fire "bd -C $ONE close CHR-1 && bd -C $TWO close CHR-2"
 grep -q "push $ONE" "$BD_LOG.dirs" && grep -q "push $TWO" "$BD_LOG.dirs" &&
   report ok || report bad "both -C targets must sync (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -711,7 +796,7 @@ teardown
 # --- a single-quoted `-C` target is recognised -------------------------
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 fire "bd -C '$OUT' close CHR-1"
 grep -q "push $OUT" "$BD_LOG.dirs" && report ok ||
   report bad "a single-quoted -C target must be synced (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -726,7 +811,7 @@ for QUOTE in dq sq esc; do
   setup
   BASE=$(mktemp -d)
   OUT="$BASE/a b"
-  mkdir -p "$OUT/.beads"
+  make_store "$OUT"
   case "$QUOTE" in
     dq) fire "bd -C \"$OUT\" close CHR-1" ;;
     sq) fire "bd -C '$OUT' close CHR-1" ;;
@@ -746,7 +831,7 @@ for FORM in dq bare braced env tilde; do
   setup
   BASE=$(mktemp -d)
   OUT="$BASE/store"
-  mkdir -p "$OUT/.beads"
+  make_store "$OUT"
   case "$FORM" in
     dq) fire "OUT=$OUT; bd -C \"\$OUT\" close CHR-1" ;;
     bare) fire "OUT=$OUT && bd -C \$OUT close CHR-1" ;;
@@ -771,7 +856,7 @@ done
 for LEAD in 'if' 'while' 'until' '!' 'time' 'if !' 'then'; do
   setup
   OUT=$(mktemp -d)
-  mkdir -p "$OUT/.beads"
+  make_store "$OUT"
   fire "$LEAD bd -C $OUT close CHR-1"
   grep -qF "push $OUT" "$BD_LOG.dirs" && report ok ||
     report bad "a -C target after '$LEAD' must be synced (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -785,7 +870,7 @@ done
 setup
 BASE=$(mktemp -d)
 OUT="$BASE/a b"
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 fire "if bd -C \"$OUT\" close CHR-1; then echo done; fi"
 grep -qF "push $OUT" "$BD_LOG.dirs" && report ok ||
   report bad "a quoted -C target after a keyword must be synced (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -798,7 +883,7 @@ teardown
 # command that merely mentions the text must not contribute a store.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 fire "echo bd -C $OUT close CHR-1"
 ! grep -qF "push $OUT" "$BD_LOG.dirs" && report ok ||
   report bad "a mentioned -C must not be synced (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -815,7 +900,7 @@ teardown
 # is a prefix word, `list` is still the verb.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 fire "if bd -C $OUT list; then echo done; fi"
 [ ! -s "$BD_LOG.dirs" ] && report ok ||
   report bad "a keyword-led read-only -C must be suppressed (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -827,7 +912,7 @@ teardown
 # than the target having been lost before it was ever judged.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 fire "bd -C $OUT list"
 [ ! -s "$BD_LOG.dirs" ] && report ok ||
   report bad "an unanchored read-only -C must still be suppressed (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -838,7 +923,7 @@ teardown
 # The one in effect when the `bd` runs, not the first one written.
 setup
 BASE=$(mktemp -d)
-mkdir -p "$BASE/one/.beads" "$BASE/two/.beads"
+make_store "$BASE/one" "$BASE/two"
 fire "OUT=$BASE/one; OUT=$BASE/two; bd -C \"\$OUT\" close CHR-1"
 grep -qF "push $BASE/two" "$BD_LOG.dirs" && report ok ||
   report bad "the last assignment must win (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -880,7 +965,7 @@ teardown
 # can find it, and the two recovery paths this design rests on both miss.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 export BD_PUSH_FAIL=1
 fire "bd -C $OUT close CHR-1"
 [ -e "$OUT/.beads/.augment-sync.pending" ] && report ok ||
@@ -899,7 +984,7 @@ teardown
 # --- the SessionEnd backstop reaches an external target ----------------
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 export BD_PUSH_FAIL=1
 fire "bd -C $OUT close CHR-1"
 unset BD_PUSH_FAIL
@@ -917,7 +1002,7 @@ teardown
 # not the registry, and so not SessionEnd either.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 ASYNC="$WS/.beads/.augment-sync.async"
 REG="$WS/.beads/.augment-sync.external"
 CONV=conv-a fire "(sleep 5; bd -C $OUT close CHR-1) &"
@@ -956,7 +1041,7 @@ teardown
 # waits, so its store is settled as any other.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 ASYNC="$WS/.beads/.augment-sync.async"
 CONV=conv-a fire "setsid -f bash -c 'sleep 5; bd -C $OUT close CHR-1'"
 registered "$OUT" "$ASYNC" && report ok ||
@@ -980,11 +1065,11 @@ teardown
 # from, and a launch waited for is settled as any other.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 PARENT=$(mktemp -d)
 NEW="$PARENT/store"
 WAITED=$(mktemp -d)
-mkdir -p "$WAITED/.beads"
+make_store "$WAITED"
 ASYNC="$WS/.beads/.augment-sync.async"
 CONV=conv-a FIRE_WAIT=false fire "sleep 5; bd -C $OUT close CHR-1; mkdir -p $NEW/.beads; bd -C $NEW close CHR-2"
 registered "$OUT" "$ASYNC" && registered "+$NEW" "$ASYNC" && report ok ||
@@ -1001,9 +1086,9 @@ teardown
 # starts (#44). A 1.x call without it is waited for.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 WAITED=$(mktemp -d)
-mkdir -p "$WAITED/.beads"
+make_store "$WAITED"
 ASYNC="$WS/.beads/.augment-sync.async"
 CONV=conv-a event "sleep 5; bd -C $OUT close CHR-1" |
   jq '.tool_name = "bash" | .tool_input.background = true' |
@@ -1024,7 +1109,7 @@ teardown
 # the guard may be settling it, so the case starts with one in place.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 ASYNC="$WS/.beads/.augment-sync.async"
 REG="$WS/.beads/.augment-sync.external"
 fire "bd -C $OUT close CHR-1 &"
@@ -1045,7 +1130,7 @@ teardown
 # it -- a name unset under `set -u` -- would end the hook before the sync.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 sleep 300 &
 HOLDER=$!
 hold_lock "$WS/.beads/.augment-sync.async.guard" "$HOLDER"
@@ -1067,7 +1152,7 @@ setup
 OUT=$(mktemp -d)
 CMD="("
 for i in $(seq 1 13); do
-  mkdir -p "$OUT/s$i/.beads"
+  make_store "$OUT/s$i"
   CMD+="bd -C $OUT/s$i close CHR-1; "
 done
 CMD+=") &"
@@ -1108,7 +1193,7 @@ registered "+$NEW" "$WS/.beads/.augment-sync.async" && report ok ||
 CONV=conv-b fire_end
 registered "+$NEW" "$WS/.beads/.augment-sync.async" && report ok ||
   report bad "another session's SessionEnd must keep a record whose store is not there yet (async: $(reg_dump "$WS/.beads/.augment-sync.async"))"
-mkdir -p "$NEW/.beads"
+make_store "$NEW"
 : >"$BD_LOG.dirs"
 CONV=conv-a fire_end
 grep -q "push $NEW" "$BD_LOG.dirs" && report ok ||
@@ -1126,7 +1211,8 @@ ASYNC="$WS/.beads/.augment-sync.async"
 CONV=conv-a fire "(sleep 5; mkdir -p $PARENT/.beads $PARENT/sub; bd -C $PARENT/sub close CHR-1) &"
 registered "+$PARENT/sub" "$ASYNC" && report ok ||
   report bad "a background -C must be kept as a directory to walk up from (async: $(reg_dump "$ASYNC"))"
-mkdir -p "$PARENT/.beads" "$PARENT/sub"
+make_store "$PARENT"
+mkdir -p "$PARENT/sub"
 : >"$BD_LOG.dirs"
 CONV=conv-a fire_end
 grep -qxF "push $PARENT" "$BD_LOG.dirs" && report ok ||
@@ -1141,16 +1227,33 @@ teardown
 # makes it first, so the directory is kept beside the store found now.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads" "$OUT/child"
+make_store "$OUT"
+mkdir -p "$OUT/child"
 ASYNC="$WS/.beads/.augment-sync.async"
 CONV=conv-a fire "(sleep 5; cd $OUT/child; bd init; bd create X) &"
 registered "$OUT" "$ASYNC" && registered "+$OUT/child" "$ASYNC" && report ok ||
   report bad "a background bd must keep both the store found and the directory it walks up from (async: $(reg_dump "$ASYNC"))"
-mkdir -p "$OUT/child/.beads"
+make_store "$OUT/child"
 : >"$BD_LOG.dirs"
 CONV=conv-a fire_end
 grep -qxF "push $OUT/child" "$BD_LOG.dirs" && report ok ||
   report bad "SessionEnd must sync a nearer store the background job made (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
+rm -rf "$OUT"
+teardown
+
+# --- a background -C walks past a `.beads` holding no project files ----
+# SessionEnd's walk up from the record applies the same test as the scan: an
+# empty `.beads` below a store is passed over for the store above.
+setup
+OUT=$(mktemp -d)
+make_store "$OUT"
+mkdir -p "$OUT/plain/.beads"
+CONV=conv-a fire "(sleep 5; bd -C $OUT/plain close CHR-1) &"
+: >"$BD_LOG.dirs"
+CONV=conv-a fire_end
+grep -qxF "push $OUT" "$BD_LOG.dirs" && ! grep -qxF "push $OUT/plain" "$BD_LOG.dirs" &&
+  report ok ||
+  report bad "SessionEnd must walk past a .beads with no project files (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
 rm -rf "$OUT"
 teardown
 
@@ -1160,7 +1263,7 @@ teardown
 # and one that may since have been deleted.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 fire "bd -C $OUT close CHR-1"
 : >"$BD_LOG.dirs"
 fire 'bd close CHR-1'
@@ -1395,7 +1498,7 @@ teardown
 # it is what the timeout does.
 setup
 ALT=$(mktemp -d)
-mkdir -p "$ALT/.beads"
+make_store "$ALT"
 sleep 300 &
 HOLDER=$!
 for D in "$WS" "$ALT"; do
@@ -1418,7 +1521,7 @@ teardown
 # 60s hook timeout, so the second is killed rather than visited.
 setup
 ALT=$(mktemp -d)
-mkdir -p "$ALT/.beads"
+make_store "$ALT"
 sleep 300 &
 HOLDER=$!
 for D in "$WS" "$ALT"; do
@@ -1441,7 +1544,7 @@ teardown
 # record whose loss strands a write.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 fire "bd -C $OUT close CHR-1"
 REG="$WS/.beads/.augment-sync.external"
 # Re-register by hand: the entry above settled and was pruned.
@@ -1460,7 +1563,7 @@ teardown
 # --- a stale registry guard does not disable the registry --------------
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 REG="$WS/.beads/.augment-sync.external"
 (exit 0) &
 DEAD=$!
@@ -1487,7 +1590,7 @@ teardown
 # owner, which is all the dead recorder left behind.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 REG="$WS/.beads/.augment-sync.external"
 reg_write "$REG" "$OUT"
 (exit 0) &
@@ -1533,7 +1636,7 @@ teardown
 # after the pass has claimed the marker and before the settle.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 REG="$WS/.beads/.augment-sync.external"
 reg_write "$REG" "$OUT"
 (exit 0) &
@@ -1578,7 +1681,7 @@ teardown
 setup
 ONE=$(mktemp -d)
 TWO=$(mktemp -d)
-mkdir -p "$ONE/.beads" "$TWO/.beads"
+make_store "$ONE" "$TWO"
 fire "OUT=$ONE; bd -C \"\$OUT\" close CHR-1; OUT=$TWO"
 grep -qF "push $ONE" "$BD_LOG.dirs" && report ok ||
   report bad "the store the write reached must be synced (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -1594,7 +1697,7 @@ teardown
 setup
 ONE=$(mktemp -d)
 TWO=$(mktemp -d)
-mkdir -p "$ONE/.beads" "$TWO/.beads"
+make_store "$ONE" "$TWO"
 fire "OUT=$ONE; OUT=$TWO; bd -C \"\$OUT\" close CHR-1"
 grep -qF "push $TWO" "$BD_LOG.dirs" && report ok ||
   report bad "the last assignment before the bd must win (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -1607,7 +1710,7 @@ teardown
 setup
 ONE=$(mktemp -d)
 TWO=$(mktemp -d)
-mkdir -p "$ONE/.beads" "$TWO/.beads"
+make_store "$ONE" "$TWO"
 fire "OUT=$ONE; bd -C \"\$OUT\" close CHR-1; OUT=$TWO; bd -C \"\$OUT\" close CHR-2"
 grep -qF "push $ONE" "$BD_LOG.dirs" && grep -qF "push $TWO" "$BD_LOG.dirs" &&
   report ok ||
@@ -1622,7 +1725,7 @@ teardown
 # stranded outside every root.
 setup
 BASE=$(mktemp -d)
-mkdir -p "$BASE/store/.beads"
+make_store "$BASE/store"
 fire_in "$BASE" 'bd -C store close CHR-1'
 grep -qF "push $BASE/store" "$BD_LOG.dirs" && report ok ||
   report bad "a relative -C must resolve against the launch cwd (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -1636,7 +1739,7 @@ teardown
 # Where both are present, `tool_input.cwd` is the one that counts.
 setup
 BASE=$(mktemp -d)
-mkdir -p "$BASE/.beads" "$BASE/store/.beads"
+make_store "$BASE" "$BASE/store"
 FIRE_TOOL=bash FIRE_TOP_CWD="$BASE" event 'bd close CHR-1' |
   "$BASH_UNDER_TEST" "$HOOK" >"$WS/out" 2>&1
 grep -qxF "push $BASE" "$BD_LOG.dirs" && report ok ||
@@ -1652,7 +1755,7 @@ teardown
 setup
 BASE=$(mktemp -d)
 ELSE=$(mktemp -d)
-mkdir -p "$BASE/store/.beads" "$ELSE/store/.beads"
+make_store "$BASE/store" "$ELSE/store"
 FIRE_TOP_CWD="$ELSE" fire_in "$BASE" 'bd -C store close CHR-1'
 grep -qF "push $BASE/store" "$BD_LOG.dirs" && report ok ||
   report bad "tool_input.cwd must win over the top-level cwd (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -1664,7 +1767,7 @@ teardown
 # --- a cd before the bd moves the base ---------------------------------
 setup
 BASE=$(mktemp -d)
-mkdir -p "$BASE/sub/store/.beads"
+make_store "$BASE/sub/store"
 fire_in "$BASE" 'cd sub && bd -C store close CHR-1'
 grep -qF "push $BASE/sub/store" "$BD_LOG.dirs" && report ok ||
   report bad "a cd must move the base a relative -C resolves against (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -1675,7 +1778,7 @@ teardown
 setup
 BASE=$(mktemp -d)
 ELSE=$(mktemp -d)
-mkdir -p "$BASE/store/.beads" "$ELSE/store/.beads"
+make_store "$BASE/store" "$ELSE/store"
 fire_in "$ELSE" "cd $BASE && bd -C store close CHR-1"
 grep -qF "push $BASE/store" "$BD_LOG.dirs" && report ok ||
   report bad "an absolute cd must replace the base (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -1688,7 +1791,7 @@ teardown
 # Same reasoning as the assignment case: only the prefix has run.
 setup
 BASE=$(mktemp -d)
-mkdir -p "$BASE/store/.beads" "$BASE/sub/store/.beads"
+make_store "$BASE/store" "$BASE/sub/store"
 fire_in "$BASE" 'bd -C store close CHR-1; cd sub'
 grep -qF "push $BASE/store" "$BD_LOG.dirs" && report ok ||
   report bad "a later cd must not move the base (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -1699,7 +1802,7 @@ teardown
 setup
 BASE=$(mktemp -d)
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 fire_in "$BASE" "cd /tmp && bd -C $OUT close CHR-1"
 grep -qF "push $OUT" "$BD_LOG.dirs" && report ok ||
   report bad "an absolute -C must ignore the cwd (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -1713,7 +1816,7 @@ teardown
 # sits under a store no later event names.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 REG="$WS/.beads/.augment-sync.external"
 export BD_PUSH_FAIL=1
 fire "bd -C $OUT close CHR-1"
@@ -1739,12 +1842,12 @@ teardown
 # with it.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 REG="$WS/.beads/.augment-sync.external"
 {
   sed -n '/^take_lock()/,/^drop_lock()/p;/^take_guard()/,/^}/p' "$HOOK"
   sed -n '/^take_guard_waiting()/,/^}/p;/^remember_external()/,/^}/p' "$HOOK"
-  sed -n '/^registry_has()/,/^}/p' "$HOOK"
+  sed -n '/^registry_has()/,/^}/p;/^holds_store()/,/^}/p' "$HOOK"
 } >"$WS/reg.sh"
 [ -s "$WS/reg.sh" ] && report ok ||
   report bad "remember_external must be extractable"
@@ -1779,12 +1882,12 @@ teardown
 setup
 OUT=$(mktemp -d)
 OTHER=$(mktemp -d)
-mkdir -p "$OUT/.beads" "$OTHER/.beads"
+make_store "$OUT" "$OTHER"
 REG="$WS/.beads/.augment-sync.external"
 {
   sed -n '/^take_lock()/,/^drop_lock()/p;/^take_guard()/,/^}/p' "$HOOK"
   sed -n '/^take_guard_waiting()/,/^}/p;/^remember_external()/,/^}/p' "$HOOK"
-  sed -n '/^registry_has()/,/^}/p' "$HOOK"
+  sed -n '/^registry_has()/,/^}/p;/^holds_store()/,/^}/p' "$HOOK"
 } >"$WS/reg.sh"
 reg_write "$OTHER/.beads/.augment-sync.external" "$OUT"
 bash -c "REGISTRY='$REG'; REGISTRY_GUARD='$REG.guard'
@@ -1823,12 +1926,12 @@ teardown
 setup
 OUT=$(mktemp -d)
 OTHER=$(mktemp -d)
-mkdir -p "$OUT/.beads" "$OTHER/.beads"
+make_store "$OUT" "$OTHER"
 REG="$WS/.beads/.augment-sync.external"
 {
   sed -n '/^take_lock()/,/^drop_lock()/p;/^take_guard()/,/^}/p' "$HOOK"
   sed -n '/^take_guard_waiting()/,/^}/p;/^remember_external()/,/^}/p' "$HOOK"
-  sed -n '/^registry_has()/,/^}/p' "$HOOK"
+  sed -n '/^registry_has()/,/^}/p;/^holds_store()/,/^}/p' "$HOOK"
 } >"$WS/reg.sh"
 reg_write "$REG" "$OTHER"
 BEFORE=$(ls -i "$REG" | awk '{print $1}')
@@ -1856,7 +1959,7 @@ teardown
 # the only record that a store outside every root was owed a sync.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 REG="$WS/.beads/.augment-sync.external"
 export BD_PUSH_FAIL=1
 fire "bd -C $OUT close CHR-1"
@@ -1880,7 +1983,7 @@ teardown
 # from here on. Nothing is owed to a store that no longer exists.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 REG="$WS/.beads/.augment-sync.external"
 export BD_PUSH_FAIL=1
 fire "bd -C $OUT close CHR-1"
@@ -1906,7 +2009,7 @@ setup
 BASE=$(mktemp -d)
 OUT="$BASE/a
 b"
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 REG="$WS/.beads/.augment-sync.external"
 export BD_PUSH_FAIL=1
 fire "bd -C '$OUT' close CHR-1"
@@ -1936,7 +2039,7 @@ teardown
 # consume, which is what a concurrent invocation would have raised.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 REG="$WS/.beads/.augment-sync.external"
 export BD_PUSH_FAIL=1
 fire "bd -C $OUT close CHR-1"
@@ -1992,7 +2095,7 @@ teardown
 # --- SessionEnd covers every root --------------------------------------
 setup
 ALT=$(mktemp -d)
-mkdir -p "$ALT/.beads"
+make_store "$ALT"
 fire_end "$ALT"
 grep -q "push $WS" "$BD_LOG.dirs" && grep -q "push $ALT" "$BD_LOG.dirs" &&
   report ok || report bad "SessionEnd must sync every root (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -2046,7 +2149,7 @@ teardown
 # ... and an external store synced that way is settled, not kept as owed.
 setup
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 REG="$WS/.beads/.augment-sync.external"
 export BD_AUTO_PUSH_OFF=1
 fire "bd -C $OUT close CHR-1"
@@ -2077,7 +2180,7 @@ setup
 NLWS=$(mktemp -d)
 NLROOT="$NLWS/a
 b"
-mkdir -p "$NLROOT/.beads"
+make_store "$NLROOT"
 # The event is built here rather than through `event`, since the root under
 # test is the newline one rather than the scratch workspace.
 jq -n --arg e PostToolUse --arg w "$NLROOT" --arg c 'bd close CHR-1' \
@@ -2104,7 +2207,7 @@ teardown
 # syncs every root, which is why that case runs `bd list`.
 setup
 TWO=$(mktemp -d)
-mkdir -p "$TWO/.beads"
+make_store "$TWO"
 while IFS='|' read -r WANT FIRED EDIT; do
   rm -f "$BD_LOG.dirs"
   event "$FIRED" "$TWO" | jq "$EDIT" | "$BASH_UNDER_TEST" "$HOOK" >/dev/null 2>&1
@@ -2410,7 +2513,7 @@ teardown
 setup
 REG="$WS/.beads/.augment-sync.external"
 OUT=$(mktemp -d)
-mkdir -p "$OUT/.beads"
+make_store "$OUT"
 export BD_PUSH_SLEEP=8
 fire_bg "bd -C $OUT close CHR-1"
 sleep 3
@@ -2434,7 +2537,7 @@ teardown
 setup
 REG="$WS/.beads/.augment-sync.external"
 DECOY="$WS/decoy"
-mkdir -p "$DECOY/store/.beads"
+make_store "$DECOY/store"
 # No FIRE_CWD, so the event carries no cwd, and the hook runs in $DECOY.
 (cd "$DECOY" && event 'bd -C store close CHR-1' | "$BASH_UNDER_TEST" "$HOOK" >/dev/null 2>&1)
 ! grep -qF "push $DECOY/store" "$BD_LOG.dirs" && report ok ||
@@ -2458,7 +2561,7 @@ teardown
 # named, exactly as an unresolvable `-C` cannot.
 setup
 DECOY="$WS/decoy"
-mkdir -p "$DECOY/.beads"
+make_store "$DECOY"
 OUTPUT=$( (cd "$DECOY" && event 'bd close CHR-1' | "$BASH_UNDER_TEST" "$HOOK" 2>/dev/null) )
 grep -q "could not be resolved" <<<"$OUTPUT" && report ok ||
   report bad "a plain bd with no reported cwd must warn (out: $OUTPUT)"
@@ -2498,7 +2601,7 @@ teardown
 # relative targets from resolving at all.
 setup
 OUT="$WS/from"
-mkdir -p "$OUT/store/.beads"
+make_store "$OUT/store"
 fire_in "$OUT" 'bd -C store close CHR-1'
 grep -qF "push $OUT/store" "$BD_LOG.dirs" && report ok ||
   report bad "a supplied cwd must still resolve a relative target (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -2513,7 +2616,8 @@ teardown
 setup
 REG="$WS/.beads/.augment-sync.external"
 ELSE=$(mktemp -d)
-mkdir -p "$ELSE/.beads" "$ELSE/sub"
+make_store "$ELSE"
+mkdir -p "$ELSE/sub"
 fire_in "$ELSE/sub" 'bd close CHR-1'
 grep -qF "push $ELSE" "$BD_LOG.dirs" && report ok ||
   report bad "a store found by the walk up must be pushed (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -2546,7 +2650,8 @@ teardown
 setup
 REG="$WS/.beads/.augment-sync.external"
 ELSE=$(mktemp -d)
-mkdir -p "$ELSE/.beads" "$ELSE/sub/deeper"
+make_store "$ELSE"
+mkdir -p "$ELSE/sub/deeper"
 fire "bd -C $ELSE/sub/deeper close CHR-1"
 grep -qF "push $ELSE" "$BD_LOG.dirs" && report ok ||
   report bad "a -C below the store must push the store (dirs: $(tr '\n' ',' <"$BD_LOG.dirs"))"
@@ -2581,7 +2686,8 @@ teardown
 setup
 REG="$WS/.beads/.augment-sync.external"
 ELSE=$(mktemp -d)
-mkdir -p "$ELSE/.beads" "$ELSE/sub"
+make_store "$ELSE"
+mkdir -p "$ELSE/sub"
 ELSE_AT=$(cd "$ELSE" && pwd -P)
 fire_in "$WS" "env -C $ELSE bd close CHR-1"
 grep -qF "push $ELSE_AT" "$BD_LOG.dirs" && report ok ||
@@ -2612,7 +2718,7 @@ teardown
 setup
 OTHER=$(mktemp -d)
 ELSE=$(mktemp -d)
-mkdir -p "$OTHER/.beads" "$ELSE/.beads"
+make_store "$OTHER" "$ELSE"
 # B alone, and a push that refuses, so the entry survives to be found.
 export BD_PUSH_FAIL=1
 FIRE_CWD="" event_as PostToolUse "bd -C $ELSE close CHR-1" |
@@ -2638,7 +2744,7 @@ teardown
 setup
 OTHER=$(mktemp -d)
 GONE=$(mktemp -d)
-mkdir -p "$OTHER/.beads"
+make_store "$OTHER"
 reg_write "$OTHER/.beads/.augment-sync.external" "$GONE"
 rm -rf "$GONE"
 fire 'ls -la' "$OTHER"
@@ -2666,7 +2772,7 @@ setup
 REG="$WS/.beads/.augment-sync.external"
 ONE=$(mktemp -d)
 TWO=$(mktemp -d)
-mkdir -p "$ONE/.beads" "$TWO/.beads"
+make_store "$ONE" "$TWO"
 {
   sed -n '/^take_lock()/,/^drop_lock()/p;/^take_guard()/,/^}/p' "$HOOK"
   sed -n '/^filter_registry()/,/^}/p' "$HOOK"
@@ -2692,7 +2798,7 @@ setup
 REG="$WS/.beads/.augment-sync.external"
 ONE=$(mktemp -d)
 TWO=$(mktemp -d)
-mkdir -p "$ONE/.beads" "$TWO/.beads"
+make_store "$ONE" "$TWO"
 {
   sed -n '/^take_lock()/,/^drop_lock()/p;/^take_guard()/,/^}/p' "$HOOK"
   sed -n '/^filter_registry()/,/^}/p' "$HOOK"

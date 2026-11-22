@@ -200,11 +200,11 @@ def _read_dolt_database_from_metadata(beads_dir: Path) -> str | None:
 
 
 def _find_nearest_local_beads_dir(candidate_dir: Path) -> Path | None:
-    """Walk up from `candidate_dir` (stopping at git root) for a local `.beads/`."""
+    """Walk up from `candidate_dir` (stopping at git root) for a local `.beads/` store."""
     cur = candidate_dir.resolve()
     while True:
         cand = cur / ".beads"
-        if cand.is_dir():
+        if holds_store(cand):
             return cand
         if (cur / ".git").exists() or cur.parent == cur:
             return None

@@ -215,7 +215,10 @@ def _read_paren_subst(text: str, pos: int) -> tuple[str, int]:
                 i, _ = _consume_heredoc_bodies(text, i, pending_heredocs)
                 pending_heredocs.clear()
             continue
-        if ch == "<" and text.startswith("<<", i) and not text.startswith("<<<", i):
+        if ch == "<" and text.startswith("<<<", i):
+            i += 3
+            continue
+        if ch == "<" and text.startswith("<<", i):
             strip_tabs = text.startswith("<<-", i)
             after_op = i + (3 if strip_tabs else 2)
             delim, delim_quoted, i = _read_heredoc_delim_inline(text, after_op)

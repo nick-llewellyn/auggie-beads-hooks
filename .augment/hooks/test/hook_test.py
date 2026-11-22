@@ -485,6 +485,18 @@ class TestPrimeHook(HookTestBase):
         same_primes = [c for c, a in self.bd_calls() if a == "prime"]
         self.assertEqual(len(same_primes), 1)
 
+        # An empty nested .beads/ inside a subdirectory of root_b MUST NOT hide root_b's dolt_database
+        nested_sub = root_b / "nested"
+        (nested_sub / ".beads").mkdir(parents=True)
+        self.log_file.write_text("", encoding="utf-8")
+        res_nested = self.run_hook(
+            PRIME_SH,
+            payload={"workspace_roots": [str(shared), str(nested_sub)]},
+        )
+        self.assertEqual(res_nested.returncode, 0)
+        nested_primes = [Path(c).resolve() for c, a in self.bd_calls() if a == "prime"]
+        self.assertEqual(nested_primes, [shared.resolve(), nested_sub.resolve()])
+
     def test_slow_later_root_discovery_does_not_starve_first_root_prime(self) -> None:
         good = self.tmp / "good-root"
         self.make_store(good)
@@ -589,6 +601,8 @@ class TestGuardHook(HookTestBase):
         "cat <(bd edit abh-1)",
         # Heredoc with apostrophe inside $(...) followed by trailing bd edit
         "echo \"$(cat <<'EOF'\nDon't break boundary\nEOF\n)\" && bd edit abh-1",
+        # Here-string inside multiline $(...) must not be misread as a heredoc
+        'echo "$(cat <<<hello\n)"; bd edit abh-1',
         # Command after a heredoc closes
         "cat <<'EOF'\nhello\nEOF\nbd edit abh-1",
     ]

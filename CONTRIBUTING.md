@@ -172,6 +172,10 @@ Then comment on the issue: ``Tracked as bead `abh-<id>`.``
 
 ## Example
 
+Illustrative hypothetical example showing the expected structure of an issue
+report and matching bead (the here-string case below is already fixed in
+`v0.3.0`; versions and output are illustrative placeholders).
+
 Title: ``beads-guard.sh: blocks `bd edit` when it appears as a here-string literal``.
 Label: `bug`.
 
@@ -187,18 +191,19 @@ Found while reviewing shell-tokenization edge cases.
 
 ## Reproduce
 
-Versions: bd 1.3.4 (Homebrew), Antigravity 1.5.14, hooks v0.3.0 (be8959b),
+Versions: bd 1.3.4 (Homebrew), Antigravity 1.5.14, hooks vX.Y.Z (<commit>),
 macOS, /bin/bash 3.2.57, Python 3.13.
 
 ```console
 $ printf '%s\n' '{"tool_input":{"command":"cat <<< \"bd edit abh-1\""}}' | \
 >   /bin/bash path/to/.augment/hooks/beads-guard.sh --agent antigravity
+# Hypothetical failing output before the fix:
 {"decision": "deny", "reason": "beads: 'bd edit' opens an interactive $EDITOR ..."}
 ```
 
 Expected: empty stdout and exit 0 (allow), because `bd edit abh-1` is the
 here-string payload rather than an executed command.
-Actual: JSON deny response.
+Actual (hypothetical): JSON deny response.
 
 ## Cause
 
@@ -220,7 +225,7 @@ Low. Causes a false-positive guard block when echoing or piping literal
 quoted heredoc or `printf`.
 ````
 
-The matching bead:
+The matching bead (hypothetical):
 
 ```bash
 bd create --type=bug --priority=2 --labels=bug \

@@ -256,7 +256,7 @@ class TestPrimeHook(HookTestBase):
         res = self.run_hook(PRIME_SH, cwd=other, extra_env={"AUGMENT_PROJECT_DIR": str(ws)})
         self.assertEqual(res.returncode, 0)
         self.assertIn("PRIMED-CONTEXT", res.stdout)
-        prime_calls = [c for c, a in self.bd_calls() if a == "prime"]
+        prime_calls = [c for c, a in self.bd_calls() if a == "prime --sandbox"]
         self.assertEqual([Path(c).resolve() for c in prime_calls], [ws.resolve()])
 
     def test_antigravity_prime_json_schema(self) -> None:
@@ -328,7 +328,7 @@ class TestPrimeHook(HookTestBase):
             payload={"workspace_roots": [str(ws), str(sub)]},
         )
         self.assertEqual(res.returncode, 0)
-        prime_calls = [a for _, a in self.bd_calls() if a == "prime"]
+        prime_calls = [a for _, a in self.bd_calls() if a == "prime --sandbox"]
         self.assertEqual(len(prime_calls), 1)
 
     def test_cdpath_and_relative_path_bd(self) -> None:
@@ -343,7 +343,7 @@ class TestPrimeHook(HookTestBase):
         )
         self.assertEqual(res.returncode, 0)
         self.assertEqual(res.stdout.strip(), "PRIMED-CONTEXT")
-        prime_calls = [Path(c).resolve() for c, a in self.bd_calls() if a == "prime"]
+        prime_calls = [Path(c).resolve() for c, a in self.bd_calls() if a == "prime --sandbox"]
         self.assertEqual(prime_calls, [real.resolve()])
 
         # Relative PATH entry (`bin:/usr/bin:/bin`) resolved before chdir
@@ -377,7 +377,7 @@ class TestPrimeHook(HookTestBase):
         self.assertIn("PRIMED-CONTEXT", res.stdout)
         actions = [a for _, a in self.bd_calls()]
         self.assertIn("dolt pull --sandbox --remote origin", actions)
-        self.assertLess(actions.index("dolt pull --sandbox --remote origin"), actions.index("prime"))
+        self.assertLess(actions.index("dolt pull --sandbox --remote origin"), actions.index("prime --sandbox"))
 
     def test_session_start_skips_pull_when_local_only_or_no_remote(self) -> None:
         ws = self.tmp / "local-repo"
@@ -392,7 +392,7 @@ class TestPrimeHook(HookTestBase):
         )
         actions = [a for _, a in self.bd_calls()]
         self.assertFalse(any(a.startswith("dolt pull") for a in actions))
-        self.assertIn("prime", actions)
+        self.assertIn("prime --sandbox", actions)
 
     def test_session_start_pull_timeout_still_primes(self) -> None:
         ws = self.tmp / "slow-remote"
@@ -462,7 +462,7 @@ class TestPrimeHook(HookTestBase):
             payload={"workspace_roots": [str(root_a), str(root_b)]},
         )
         self.assertEqual(res.returncode, 0)
-        prime_cwds = [Path(c).resolve() for c, a in self.bd_calls() if a == "prime"]
+        prime_cwds = [Path(c).resolve() for c, a in self.bd_calls() if a == "prime --sandbox"]
         self.assertEqual(prime_cwds, [root_a.resolve(), root_b.resolve()])
 
         self.log_file.write_text("", encoding="utf-8")
@@ -482,7 +482,7 @@ class TestPrimeHook(HookTestBase):
             payload={"workspace_roots": [str(shared), str(root_a)]},
         )
         self.assertEqual(res_same.returncode, 0)
-        same_primes = [c for c, a in self.bd_calls() if a == "prime"]
+        same_primes = [c for c, a in self.bd_calls() if a == "prime --sandbox"]
         self.assertEqual(len(same_primes), 1)
 
         # An empty nested .beads/ inside a subdirectory of root_b MUST NOT hide root_b's dolt_database
@@ -494,7 +494,7 @@ class TestPrimeHook(HookTestBase):
             payload={"workspace_roots": [str(shared), str(nested_sub)]},
         )
         self.assertEqual(res_nested.returncode, 0)
-        nested_primes = [Path(c).resolve() for c, a in self.bd_calls() if a == "prime"]
+        nested_primes = [Path(c).resolve() for c, a in self.bd_calls() if a == "prime --sandbox"]
         self.assertEqual(nested_primes, [shared.resolve(), nested_sub.resolve()])
 
     def test_slow_later_root_discovery_does_not_starve_first_root_prime(self) -> None:
@@ -545,9 +545,10 @@ class TestPrimeHook(HookTestBase):
         self.assertIn("bd dolt remote list", res_prime.stdout)
         self.assertIn("PRIMED-CONTEXT", res_prime.stdout)
         calls = [a for _, a in self.bd_calls()]
-        self.assertIn("where --json=false", calls)
-        self.assertIn("config get dolt.local-only --json=false", calls)
-        self.assertIn("dolt remote list --json=false", calls)
+        self.assertIn("where --sandbox --json=false", calls)
+        self.assertIn("config get dolt.local-only --sandbox --json=false", calls)
+        self.assertIn("dolt remote list --sandbox --json=false", calls)
+        self.assertIn("prime --sandbox", calls)
 
         self.log_file.write_text("", encoding="utf-8")
         res_sync = self.run_hook(

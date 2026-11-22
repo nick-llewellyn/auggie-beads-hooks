@@ -295,7 +295,7 @@ def discover_store(
 
     try:
         res = subprocess.run(
-            [bd_path, "where", "--json=false"],
+            [bd_path, "where", "--sandbox", "--json=false"],
             cwd=str(candidate_dir),
             env=env,
             stdin=subprocess.DEVNULL,
@@ -443,7 +443,7 @@ def get_bd_config(
         return None
     try:
         res = subprocess.run(
-            [bd_path, "config", "get", key, "--json=false"],
+            [bd_path, "config", "get", key, "--sandbox", "--json=false"],
             cwd=str(run_dir),
             env=env,
             stdin=subprocess.DEVNULL,
@@ -486,7 +486,7 @@ def list_dolt_remotes(
         return None, f"beads: hook time budget exhausted before checking Dolt remotes in {run_dir}."
     try:
         res = subprocess.run(
-            [bd_path, "dolt", "remote", "list", "--json=false"],
+            [bd_path, "dolt", "remote", "list", "--sandbox", "--json=false"],
             cwd=str(run_dir),
             env=env,
             stdin=subprocess.DEVNULL,
@@ -686,7 +686,7 @@ def cmd_prime(agent: str) -> int:
 
         try:
             prime_res = subprocess.run(
-                [bd_path, "prime"],
+                [bd_path, "prime", "--sandbox"],
                 cwd=str(store.run_dir),
                 env=env,
                 stdin=subprocess.DEVNULL,

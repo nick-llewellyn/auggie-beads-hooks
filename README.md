@@ -28,6 +28,7 @@ projects need neither a copy of the hooks nor any wiring of their own.
 | `.augment/hooks/beads-guard.sh` | PreToolUse shim: invokes `lib/beads_hook.py guard`. |
 | `.augment/hooks/beads-sync.sh` | Stop / SessionEnd shim: invokes `lib/beads_hook.py sync`. |
 | `.augment/hooks/lib/beads_hook.py` | Stdlib-only Python core implementing store discovery, `flock` locking, priming, guard, and sync. |
+| `.augment/hooks/lib/shell_tokens.py` | Shared POSIX-style shell tokenizer (quotes, operators, newlines, redirections, heredocs). |
 | `.augment/hooks/lib/wiring.py` | Stdlib-only Python helper used by `install.sh` to wire/unwire/inspect Auggie and Antigravity configs. |
 | `.augment/hooks/test/` | Fast unittest suite (`hook_test.py`) and `/bin/bash` runner (`run_tests.sh`). |
 | `.github/workflows/auggie-hooks.yaml` | Runs syntax checks, unit tests, and installer tests on Ubuntu and macOS. |
@@ -141,8 +142,11 @@ or `--prefix <dir>`), verifies the scripts, and atomically switches `current`.
 ```
 
 Moving `current` takes effect immediately for subsequent hook invocations.
-Installing an already-installed tag rolls `current` back to it (including
-`v0.2.x` releases).
+Upgrading from a legacy `v0.2.x` install (which wired `PostToolUse`) requires
+passing `--wire` (or `--agent all --wire`) to migrate the hook routes cleanly.
+Rolling back to a legacy `v0.2.x` release requires unwiring first
+(`install.sh --agent all --unwire`) so `PreToolUse` and Antigravity routes do
+not point at missing or incompatible scripts.
 
 ### Moving a project off an old local copy
 
@@ -153,6 +157,7 @@ Delete any repo-local copies of the files supplied by this repository:
 .augment/hooks/beads-prime.sh
 .augment/hooks/beads-sync.sh
 .augment/hooks/lib/beads_hook.py
+.augment/hooks/lib/shell_tokens.py
 .augment/hooks/lib/wiring.py
 .augment/hooks/test/hook_test.py
 .augment/hooks/test/run_tests.sh

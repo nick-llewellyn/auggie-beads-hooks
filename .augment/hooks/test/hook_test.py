@@ -79,6 +79,12 @@ def find_store(start: Path):
         cur = cur.parent
 
 if cmd == "where":
+    delay = float(os.environ.get("BD_WHERE_SLEEP", "0"))
+    if delay > 0:
+        time.sleep(delay)
+    if os.environ.get("BD_WHERE_FAIL") == "1":
+        sys.stderr.write("Error: failed to read metadata.json: permission denied\\n")
+        sys.exit(1)
     if os.environ.get("BD_WHERE_UNKNOWN") == "1":
         sys.stderr.write("Error: unknown command \\"where\\" for \\"bd\\"\\n")
         sys.exit(1)
@@ -86,8 +92,14 @@ if cmd == "where":
     if store is None:
         sys.stderr.write("Error: No active beads workspace found.\\n")
         sys.exit(1)
-    print(str(store))
-    print(f"  database: {{store / 'dolt'}}")
+    # Follow .beads/redirect while preserving source dolt_database
+    redir = store / "redirect"
+    resolved = store
+    if redir.is_file():
+        target = Path(redir.read_text(encoding="utf-8").strip())
+        resolved = target if target.is_absolute() else (store.parent / target).resolve()
+    print(str(resolved))
+    print(f"  database: {{resolved / 'dolt'}}")
     sys.exit(0)
 
 if cmd == "prime":
@@ -402,6 +414,75 @@ class TestPrimeHook(HookTestBase):
         self.assertIn("'bd prime' failed", res.stdout)
         self.assertIn("store locked", res.stdout)
 
+    def test_bd_where_error_and_timeout_reported_not_silently_skipped(self) -> None:
+        ws = self.tmp / "bad-where"
+        ws.mkdir()
+        res_err = self.run_hook(
+            PRIME_SH,
+            payload={"workspace_roots": [str(ws)]},
+            extra_env={"BD_WHERE_FAIL": "1"},
+        )
+        self.assertEqual(res_err.returncode, 0)
+        self.assertIn("'bd where' failed", res_err.stdout)
+        self.assertIn(str(ws), res_err.stdout)
+
+        res_to = self.run_hook(
+            SYNC_SH,
+            payload={"hook_event_name": "Stop", "workspace_roots": [str(ws)]},
+            extra_env={"BD_WHERE_SLEEP": "0.5", "BEADS_HOOK_PROBE_TIMEOUT": "0.1"},
+        )
+        self.assertEqual(res_to.returncode, 0)
+        self.assertIn("'bd where' timed out", res_to.stderr)
+        self.assertIn(str(ws), res_to.stderr)
+
+    def test_redirect_distinct_dolt_databases_not_collapsed(self) -> None:
+        shared = self.tmp / "shared-store"
+        shared_beads = self.make_store(shared)
+
+        root_a = self.tmp / "root-a"
+        (root_a / ".beads").mkdir(parents=True)
+        (root_a / ".beads" / "redirect").write_text(str(shared_beads) + "\n", encoding="utf-8")
+        (root_a / ".beads" / "metadata.json").write_text('{"dolt_database": "db_alpha"}\n', encoding="utf-8")
+
+        root_b = self.tmp / "root-b"
+        (root_b / ".beads").mkdir(parents=True)
+        (root_b / ".beads" / "redirect").write_text(str(shared_beads) + "\n", encoding="utf-8")
+        (root_b / ".beads" / "metadata.json").write_text('{"dolt_database": "db_beta"}\n', encoding="utf-8")
+
+        res = self.run_hook(
+            PRIME_SH,
+            payload={"workspace_roots": [str(root_a), str(root_b)]},
+        )
+        self.assertEqual(res.returncode, 0)
+        prime_cwds = [Path(c).resolve() for c, a in self.bd_calls() if a == "prime"]
+        self.assertEqual(prime_cwds, [root_a.resolve(), root_b.resolve()])
+
+        self.log_file.write_text("", encoding="utf-8")
+        res_sync = self.run_hook(
+            SYNC_SH,
+            payload={"hook_event_name": "Stop", "workspace_roots": [str(root_a), str(root_b)]},
+        )
+        self.assertEqual(res_sync.returncode, 0)
+        commit_cwds = [Path(c).resolve() for c, a in self.bd_calls() if a.startswith("dolt commit")]
+        self.assertEqual(commit_cwds, [root_a.resolve(), root_b.resolve()])
+
+    def test_whole_hook_deadline_reserves_budget_for_prime(self) -> None:
+        ws = self.tmp / "tight-budget"
+        self.make_store(ws)
+        res = self.run_hook(
+            PRIME_SH,
+            payload={"workspace_roots": [str(ws)]},
+            extra_env={
+                "BD_REMOTES": "origin   https://doltremoteapi.dolthub.com/u/repo",
+                "BD_PULL_SLEEP": "1.0",
+                "BEADS_HOOK_TOTAL_TIMEOUT": "1.2",
+                "BEADS_HOOK_PULL_TIMEOUT": "5.0",
+            },
+        )
+        self.assertEqual(res.returncode, 0)
+        # Pull must be bounded well inside total budget so bd prime still succeeds
+        self.assertIn("PRIMED-CONTEXT", res.stdout)
+
 
 class TestGuardHook(HookTestBase):
     BLOCKED_COMMANDS = [
@@ -420,6 +501,18 @@ class TestGuardHook(HookTestBase):
         "(bd edit abh-1)",
         'bash -c "bd edit abh-1"',
         "2>/dev/null bd edit abh-1",
+        # Quoted command/subcommand words
+        "b''d edit abh-1",
+        "bd ed''it abh-1",
+        '"bd" "edit" abh-1',
+        # Control constructs
+        "if true; then bd edit abh-1; fi",
+        "if false; then true; else bd edit abh-1; fi",
+        "while true; do bd edit abh-1; done",
+        "{ bd edit abh-1; }",
+        "! bd edit abh-1",
+        # Command after a heredoc closes
+        "cat <<'EOF'\nhello\nEOF\nbd edit abh-1",
     ]
 
     ALLOWED_COMMANDS = [
@@ -435,6 +528,12 @@ class TestGuardHook(HookTestBase):
         "# bd edit abh-1",
         "mybd edit abh-1",
         "rg 'bd edit' README.md",
+        # Quoted heredoc body must NOT trigger the guard
+        "cat <<'EOF' > README.md\nbd edit abh-1\nEOF",
+        "cat <<-EOF\n\tbd edit abh-1\n\tEOF",
+        # Quoted control keyword or argument is not a command boundary
+        'echo "then" bd edit abh-1',
+        'echo ";" bd edit abh-1',
     ]
 
     def test_auggie_blocks_interactive_bd_edit(self) -> None:
@@ -692,21 +791,24 @@ class TestSyncHook(HookTestBase):
             if proc.stderr:
                 proc.stderr.close()
 
-    def test_dangling_lock_symlink_cleaned_and_timeout_warns(self) -> None:
-        ws = self.tmp / "dangling"
+    def test_symlinked_lock_fails_closed_and_timeout_warns(self) -> None:
+        ws = self.tmp / "symlink-lock"
         beads = self.make_store(ws)
-        (beads / ".beads-hook.lock").symlink_to("999999:boot:0")
+        lock_path = beads / ".beads-hook.lock"
+        lock_path.symlink_to("999999:boot:0")
 
+        # Must fail closed without unlinking the symlink (prevents TOCTOU race)
         res = self.run_hook(
             SYNC_SH,
             payload={"hook_event_name": "Stop", "workspace_roots": [str(ws)]},
         )
         self.assertEqual(res.returncode, 0)
-        self.assertEqual(res.stderr, "")
-        self.assertFalse((beads / ".beads-hook.lock").is_symlink())
+        self.assertIn("symlinked lock path", res.stderr)
+        self.assertTrue(lock_path.is_symlink())
+        lock_path.unlink()
 
         # Now hold lock externally and verify timeout warning + exit 0
-        fd = os.open(str(beads / ".beads-hook.lock"), os.O_CREAT | os.O_RDWR, 0o600)
+        fd = os.open(str(lock_path), os.O_CREAT | os.O_RDWR, 0o600)
         try:
             fcntl.flock(fd, fcntl.LOCK_EX)
             res2 = self.run_hook(
@@ -722,6 +824,17 @@ class TestSyncHook(HookTestBase):
             fcntl.flock(fd, fcntl.LOCK_UN)
             os.close(fd)
 
+    def test_legacy_post_tool_use_event_skips_sync_with_migration_notice(self) -> None:
+        ws = self.tmp / "post-tool"
+        self.make_store(ws)
+        res = self.run_hook(
+            SYNC_SH,
+            payload={"hook_event_name": "PostToolUse", "workspace_roots": [str(ws)]},
+        )
+        self.assertEqual(res.returncode, 0)
+        self.assertIn("install.sh --wire", res.stderr)
+        self.assertEqual(self.bd_calls(), [])
+
 
 class TestInstallerAndWiring(HookTestBase):
     def _make_git_source(self) -> Path:
@@ -736,6 +849,7 @@ class TestInstallerAndWiring(HookTestBase):
             ".augment/hooks/beads-sync.sh",
             ".augment/hooks/beads-guard.sh",
             ".augment/hooks/lib/beads_hook.py",
+            ".augment/hooks/lib/shell_tokens.py",
             ".augment/hooks/lib/wiring.py",
         ):
             dest = src / rel
@@ -912,9 +1026,22 @@ class TestInstallerAndWiring(HookTestBase):
         src = self._make_git_source()
         q_prefix = self.tmp / "it's"
         aug_settings = self.tmp / "s.json"
+        agy_hooks = self.tmp / "h.json"
         aug_settings.write_text('{"keep": true}\n', encoding="utf-8")
         subprocess.run(
-            [BASH_BIN, str(INSTALL_SH), "--prefix", str(q_prefix), "--source", f"file://{src}", "v0.3.0"],
+            [
+                BASH_BIN,
+                str(INSTALL_SH),
+                "--prefix",
+                str(q_prefix),
+                "--source",
+                f"file://{src}",
+                "--settings",
+                str(aug_settings),
+                "--antigravity-hooks",
+                str(agy_hooks),
+                "v0.3.0",
+            ],
             check=True,
             capture_output=True,
         )
@@ -948,13 +1075,228 @@ class TestInstallerAndWiring(HookTestBase):
         git("tag", "v0.2.1")
 
         prefix = self.tmp / "rollback-prefix"
-        res = subprocess.run(
-            [BASH_BIN, str(INSTALL_SH), "--prefix", str(prefix), "--source", f"file://{legacy_src}", "v0.2.1"],
+        aug_settings = self.tmp / "rb-settings.json"
+        agy_hooks = self.tmp / "rb-hooks.json"
+
+        # First install and wire v0.3.0 for both agents
+        new_src = self._make_git_source()
+        subprocess.run(
+            [
+                BASH_BIN,
+                str(INSTALL_SH),
+                "--prefix",
+                str(prefix),
+                "--source",
+                f"file://{new_src}",
+                "--settings",
+                str(aug_settings),
+                "--antigravity-hooks",
+                str(agy_hooks),
+                "--agent",
+                "all",
+                "v0.3.0",
+                "--wire",
+            ],
+            check=True,
+            capture_output=True,
+        )
+
+        # Switching to legacy v0.2.1 while v0.3.0 / Antigravity wiring is active MUST be rejected
+        res_reject = subprocess.run(
+            [
+                BASH_BIN,
+                str(INSTALL_SH),
+                "--prefix",
+                str(prefix),
+                "--source",
+                f"file://{legacy_src}",
+                "--settings",
+                str(aug_settings),
+                "--antigravity-hooks",
+                str(agy_hooks),
+                "v0.2.1",
+            ],
             capture_output=True,
             text=True,
         )
-        self.assertEqual(res.returncode, 0, res.stderr)
+        self.assertNotEqual(res_reject.returncode, 0)
+        self.assertIn("refusing to switch", res_reject.stderr)
+        self.assertEqual(os.readlink(prefix / "current"), "v0.3.0")
+
+        # After unwiring, switching to legacy v0.2.1 succeeds
+        subprocess.run(
+            [
+                BASH_BIN,
+                str(INSTALL_SH),
+                "--prefix",
+                str(prefix),
+                "--settings",
+                str(aug_settings),
+                "--antigravity-hooks",
+                str(agy_hooks),
+                "--agent",
+                "all",
+                "--unwire",
+            ],
+            check=True,
+            capture_output=True,
+        )
+        res_ok = subprocess.run(
+            [
+                BASH_BIN,
+                str(INSTALL_SH),
+                "--prefix",
+                str(prefix),
+                "--source",
+                f"file://{legacy_src}",
+                "--settings",
+                str(aug_settings),
+                "--antigravity-hooks",
+                str(agy_hooks),
+                "v0.2.1",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res_ok.returncode, 0, res_ok.stderr)
         self.assertEqual(os.readlink(prefix / "current"), "v0.2.1")
+
+        # Upgrading back to v0.3.0 WITHOUT --wire when legacy PostToolUse wiring exists MUST be rejected
+        aug_settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PostToolUse": [
+                            {
+                                "matcher": "bash",
+                                "hooks": [{"type": "command", "command": f"{prefix}/current/.augment/hooks/beads-sync.sh"}],
+                            }
+                        ]
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        res_upgrade_reject = subprocess.run(
+            [
+                BASH_BIN,
+                str(INSTALL_SH),
+                "--prefix",
+                str(prefix),
+                "--source",
+                f"file://{new_src}",
+                "--settings",
+                str(aug_settings),
+                "--antigravity-hooks",
+                str(agy_hooks),
+                "v0.3.0",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(res_upgrade_reject.returncode, 0)
+        self.assertIn("Re-run with '--wire'", res_upgrade_reject.stderr)
+        self.assertEqual(os.readlink(prefix / "current"), "v0.2.1")
+
+        # Passing --wire succeeds and migrates wiring cleanly
+        res_upgrade_ok = subprocess.run(
+            [
+                BASH_BIN,
+                str(INSTALL_SH),
+                "--prefix",
+                str(prefix),
+                "--source",
+                f"file://{new_src}",
+                "--settings",
+                str(aug_settings),
+                "--antigravity-hooks",
+                str(agy_hooks),
+                "v0.3.0",
+                "--wire",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res_upgrade_ok.returncode, 0, res_upgrade_ok.stderr)
+        self.assertEqual(os.readlink(prefix / "current"), "v0.3.0")
+
+    def test_wiring_tokenizer_edge_cases(self) -> None:
+        src = self._make_git_source()
+        # Prefix with `+` (unquoted by quote_shell_path) must round-trip cleanly
+        prefix = self.tmp / "tools+x" / "abh"
+        aug_settings = self.tmp / "edge-settings.json"
+        agy_hooks = self.tmp / "edge-hooks.json"
+
+        aug_settings.write_text(
+            json.dumps(
+                {
+                    "hooks": {
+                        "PostToolUse": [
+                            {"matcher": "bash", "hooks": [{"type": "command", "command": "true\n/old/beads-sync.sh"}]},
+                            {"matcher": "bash", "hooks": [{"type": "command", "command": "# note\n/old/beads-sync.sh"}]},
+                            {"matcher": "bash", "hooks": [{"type": "command", "command": "cat <<EOF\ntext\nEOF\n/old/beads-sync.sh"}]},
+                            {"matcher": "bash", "hooks": [{"type": "command", "command": "cat <<<text\n/old/beads-sync.sh"}]},
+                        ],
+                        "Stop": [
+                            {"hooks": [{"type": "command", "command": "echo ';' /old/beads-sync.sh"}]},
+                            {"hooks": [{"type": "command", "command": "cat <<EOF\n/old/beads-sync.sh\nEOF"}]},
+                        ],
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        def run_inst(*args: str) -> subprocess.CompletedProcess[str]:
+            return subprocess.run(
+                [
+                    BASH_BIN,
+                    str(INSTALL_SH),
+                    "--prefix",
+                    str(prefix),
+                    "--source",
+                    f"file://{src}",
+                    "--settings",
+                    str(aug_settings),
+                    "--antigravity-hooks",
+                    str(agy_hooks),
+                    *args,
+                ],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+
+        r1 = run_inst("v0.3.0", "--wire")
+        self.assertEqual(r1.returncode, 0, r1.stderr)
+        data = json.loads(aug_settings.read_text(encoding="utf-8"))
+        # All 4 executed PostToolUse hooks removed (newline, comment+newline, post-heredoc, post-herestring)
+        self.assertNotIn("PostToolUse", data["hooks"])
+        # Quoted `;` and heredoc-body mentions preserved on Stop alongside newly wired sync
+        stop_cmds = [e["hooks"][0]["command"] for e in data["hooks"]["Stop"]]
+        self.assertIn("echo ';' /old/beads-sync.sh", stop_cmds)
+        self.assertIn("cat <<EOF\n/old/beads-sync.sh\nEOF", stop_cmds)
+        self.assertEqual(len(stop_cmds), 3)
+
+        # Second wire MUST be idempotent even with `+` in prefix
+        r2 = run_inst("--wire")
+        self.assertEqual(r2.returncode, 0, r2.stderr)
+        self.assertIn("is unchanged", r2.stdout)
+
+        # Status recognizes all 4 wired entries under `tools+x`
+        r_st = run_inst("--status")
+        self.assertEqual(r_st.returncode, 0, r_st.stderr)
+        self.assertIn("wired: SessionStart:", r_st.stdout)
+        self.assertIn("wired: PreToolUse:", r_st.stdout)
+        self.assertIn("wired: Stop:", r_st.stdout)
+        self.assertIn("wired: SessionEnd:", r_st.stdout)
+
+        # Unwire removes all 4 wired entries and preserves the 2 Stop mentions
+        r_un = run_inst("--unwire")
+        self.assertEqual(r_un.returncode, 0, r_un.stderr)
+        data_after = json.loads(aug_settings.read_text(encoding="utf-8"))
+        self.assertEqual(list(data_after["hooks"].keys()), ["Stop"])
+        self.assertEqual(len(data_after["hooks"]["Stop"]), 2)
 
 
 if __name__ == "__main__":

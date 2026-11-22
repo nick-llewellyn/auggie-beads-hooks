@@ -20,16 +20,26 @@ import shutil
 import subprocess
 import sys
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 
+from shell_tokens import Token, split_shell_segments
+
 HOOK_LOCK_NAME = ".beads-hook.lock"
-DEFAULT_LOCK_TIMEOUT_S = 30.0
+
+# Whole-hook budgets stay safely inside the installed host timeouts
+# (15s for SessionStart, 60s for Stop/SessionEnd) so output is always flushed.
+DEFAULT_PRIME_TOTAL_TIMEOUT_S = 13.5
+DEFAULT_SYNC_TOTAL_TIMEOUT_S = 55.0
+DEFAULT_PRIME_RESERVE_S = 6.0
+
+DEFAULT_LOCK_TIMEOUT_S = 25.0
 DEFAULT_PULL_TIMEOUT_S = 5.0
 DEFAULT_PRIME_TIMEOUT_S = 12.0
-DEFAULT_COMMIT_TIMEOUT_S = 30.0
-DEFAULT_PUSH_TIMEOUT_S = 45.0
-DEFAULT_PROBE_TIMEOUT_S = 5.0
+DEFAULT_COMMIT_TIMEOUT_S = 25.0
+DEFAULT_PUSH_TIMEOUT_S = 30.0
+DEFAULT_PROBE_TIMEOUT_S = 4.0
 
 SHELL_TOOL_NAMES = {"bash", "launch-process", "run_command"}
 
@@ -66,10 +76,9 @@ WRAPPER_VALUE_FLAGS: dict[str, set[str]] = {
 }
 WRAPPER_COMMANDS = {"env", "command", "exec", "nohup", "time", "nice", "sudo"}
 SHELL_COMMANDS = {"sh", "bash", "zsh", "dash"}
+CONTROL_KEYWORDS = {"if", "then", "elif", "else", "do", "{", "!", "coproc"}
 
 ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
-REDIR_OP_RE = re.compile(r"^(?:\d+)?(?:>>|>\||>&|>|<<<|<<-|<<|<>|<&|<|&>>|&>)$")
-REDIR_ATTACHED_RE = re.compile(r"^(?:\d+)?(?:>>|>\||>&|>|<<<|<<-|<<|<>|<&|<|&>>|&>).+")
 
 BD_EDIT_BLOCK_MESSAGE = (
     "beads: 'bd edit' opens an interactive $EDITOR and hangs agent sessions. "
@@ -81,6 +90,13 @@ class LockTimeoutError(Exception):
     """Raised when the per-store flock cannot be acquired within the timeout."""
 
 
+@dataclass(frozen=True)
+class StoreTarget:
+    run_dir: Path
+    beads_dir: Path
+    db_id: str
+
+
 def _env_float(name: str, default: float) -> float:
     raw = os.environ.get(name, "").strip()
     if not raw:
@@ -90,6 +106,17 @@ def _env_float(name: str, default: float) -> float:
         return val if val >= 0 else default
     except ValueError:
         return default
+
+
+def _remaining(deadline: float) -> float:
+    return max(0.0, deadline - time.monotonic())
+
+
+def _bounded_timeout(op_timeout: float, deadline: float) -> float:
+    rem = _remaining(deadline)
+    if rem <= 0.0:
+        return 0.0
+    return min(op_timeout, rem)
 
 
 def clean_subprocess_env(extra: dict[str, str] | None = None) -> dict[str, str]:
@@ -155,6 +182,60 @@ def holds_store(beads_dir: Path) -> bool:
     return False
 
 
+def _read_dolt_database_from_metadata(beads_dir: Path) -> str | None:
+    meta_path = beads_dir / "metadata.json"
+    if not meta_path.is_file():
+        return None
+    try:
+        data = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    for key in ("dolt_database", "database"):
+        val = data.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return None
+
+
+def _find_nearest_local_beads_dir(candidate_dir: Path) -> Path | None:
+    """Walk up from `candidate_dir` (stopping at git root) for a local `.beads/`."""
+    cur = candidate_dir.resolve()
+    while True:
+        cand = cur / ".beads"
+        if cand.is_dir():
+            return cand
+        if (cur / ".git").exists() or cur.parent == cur:
+            return None
+        cur = cur.parent
+
+
+def _resolve_db_identity(candidate_dir: Path, beads_dir: Path, where_stdout: str) -> str:
+    """Determine the effective database identity for deduplicating roots.
+
+    Beads preserves a redirect source's `dolt_database` even when two roots
+    redirect to the same `.beads` directory. Combine the `bd where` database
+    line with any redirect-source `metadata.json` `dolt_database` override so
+    distinct databases sharing a `.beads` directory are never collapsed.
+    """
+    where_db = ""
+    for line in where_stdout.splitlines()[1:]:
+        stripped = line.strip()
+        if stripped.lower().startswith("database:"):
+            where_db = stripped.split(":", 1)[1].strip()
+            break
+
+    local_beads = _find_nearest_local_beads_dir(candidate_dir)
+    source_db = ""
+    if local_beads is not None and local_beads.resolve() != beads_dir:
+        source_db = _read_dolt_database_from_metadata(local_beads) or ""
+
+    target_db = _read_dolt_database_from_metadata(beads_dir) or ""
+    effective_db = source_db or where_db or target_db or str(beads_dir)
+    return effective_db
+
+
 def extract_workspace_dirs(event: dict[str, Any], agent: str) -> list[Path]:
     """Collect deduplicated candidate workspace directories from event/env/cwd."""
     raw_dirs: list[str] = []
@@ -193,18 +274,25 @@ def extract_workspace_dirs(event: dict[str, Any], agent: str) -> list[Path]:
     return result
 
 
-def discover_store(bd_path: str, candidate_dir: Path, env: dict[str, str]) -> tuple[Path, Path] | None:
+def discover_store(
+    bd_path: str, candidate_dir: Path, env: dict[str, str], deadline: float
+) -> tuple[StoreTarget | None, str | None]:
     """Resolve the active Beads store for `candidate_dir` via `bd where`.
 
-    Returns `(run_dir, resolved_beads_dir)` or None if no store applies.
-    Handles linked git worktrees (e.g. Orca worktrees), subdirectories, and
-    parent-directory discovery natively through `bd where`, and verifies
-    `holds_store` to avoid non-project `.beads` directories like `~/.beads`.
+    Returns `(StoreTarget | None, diagnostic_warning | None)`.
+    Normal non-Beads directories return `(None, None)`. Timeouts, launch errors,
+    and unexpected `bd where` failures return `(None, warning)` so callers can
+    surface them instead of silently dropping an existing store.
     """
     if not candidate_dir.is_dir():
-        return None
+        return None, None
 
-    timeout_s = _env_float("BEADS_HOOK_PROBE_TIMEOUT", DEFAULT_PROBE_TIMEOUT_S)
+    op_timeout = _bounded_timeout(
+        _env_float("BEADS_HOOK_PROBE_TIMEOUT", DEFAULT_PROBE_TIMEOUT_S), deadline
+    )
+    if op_timeout <= 0.0:
+        return None, f"beads: hook time budget exhausted before checking {candidate_dir}"
+
     try:
         res = subprocess.run(
             [bd_path, "where"],
@@ -213,11 +301,16 @@ def discover_store(bd_path: str, candidate_dir: Path, env: dict[str, str]) -> tu
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
-            timeout=timeout_s,
+            timeout=op_timeout,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return None
+    except subprocess.TimeoutExpired:
+        return (
+            None,
+            f"beads: 'bd where' timed out after {op_timeout:g}s in {candidate_dir}; skipping root.",
+        )
+    except OSError as exc:
+        return None, f"beads: 'bd where' failed to start in {candidate_dir}: {exc}"
 
     if res.returncode == 0:
         first_line = ""
@@ -227,62 +320,84 @@ def discover_store(bd_path: str, candidate_dir: Path, env: dict[str, str]) -> tu
                 first_line = stripped
                 break
         if not first_line:
-            return None
+            return None, None
         beads_dir = Path(first_line)
         if not beads_dir.is_absolute():
             beads_dir = (candidate_dir / beads_dir).resolve()
         else:
             beads_dir = beads_dir.resolve()
         if holds_store(beads_dir):
-            return (candidate_dir, beads_dir)
-        return None
+            db_id = _resolve_db_identity(candidate_dir, beads_dir, res.stdout)
+            return StoreTarget(run_dir=candidate_dir, beads_dir=beads_dir, db_id=db_id), None
+        return None, None
+
+    combined = (res.stdout + "\n" + res.stderr).strip()
+    lower = combined.lower()
+    if "no active beads workspace" in lower or "no beads database found" in lower:
+        return None, None
 
     # Only fall back to direct `.beads` check if an older/minimal `bd` binary
     # literally does not recognize the `where` subcommand.
-    combined = f"{res.stdout}\n{res.stderr}".lower()
-    if "unknown command" in combined and "where" in combined:
+    if "unknown command" in lower and "where" in lower:
         direct = (candidate_dir / ".beads").resolve()
         if holds_store(direct):
-            return (candidate_dir, direct)
+            db_id = _read_dolt_database_from_metadata(direct) or str(direct)
+            return StoreTarget(run_dir=candidate_dir, beads_dir=direct, db_id=db_id), None
+        return None, None
 
-    return None
+    return (
+        None,
+        f"beads: 'bd where' failed in {candidate_dir} (exit {res.returncode}): {combined}",
+    )
 
 
 def discover_unique_stores(
-    bd_path: str, candidate_dirs: list[Path], env: dict[str, str]
-) -> list[tuple[Path, Path]]:
-    """Discover deduplicated `(run_dir, beads_dir)` pairs across workspace dirs."""
-    seen_stores: set[Path] = set()
-    stores: list[tuple[Path, Path]] = []
+    bd_path: str, candidate_dirs: list[Path], env: dict[str, str], deadline: float
+) -> tuple[list[StoreTarget], list[str]]:
+    """Discover deduplicated stores across workspace dirs, returning `(stores, warnings)`."""
+    seen_keys: set[tuple[Path, str]] = set()
+    stores: list[StoreTarget] = []
+    warnings: list[str] = []
     for candidate in candidate_dirs:
-        found = discover_store(bd_path, candidate, env)
-        if found is None:
+        if _remaining(deadline) <= 0.0:
+            warnings.append(
+                f"beads: hook time budget exhausted before checking {candidate}; skipping remaining roots."
+            )
+            break
+        target, warning = discover_store(bd_path, candidate, env, deadline)
+        if warning:
+            warnings.append(warning)
+        if target is None:
             continue
-        run_dir, beads_dir = found
-        if beads_dir in seen_stores:
+        dedup_key = (target.beads_dir, target.db_id)
+        if dedup_key in seen_keys:
             continue
-        seen_stores.add(beads_dir)
-        stores.append((run_dir, beads_dir))
-    return stores
+        seen_keys.add(dedup_key)
+        stores.append(target)
+    return stores, warnings
 
 
 @contextlib.contextmanager
 def lock_store(beads_dir: Path, timeout_s: float) -> Iterator[int]:
     """Acquire an exclusive kernel `flock` on `<beads_dir>/.beads-hook.lock`.
 
-    Yields the open file descriptor so callers can pass `pass_fds=(lock_fd,)`
-    to `bd` subprocesses; the kernel holds the lock until both the hook and any
-    child `bd` process exit, even across `SIGKILL`.
+    Fails closed on symlinks (`O_NOFOLLOW`) without ever unlinking the lock path,
+    preventing TOCTOU races where a concurrent hook could delete another hook's
+    live lock inode. Yields the open file descriptor so callers can pass
+    `pass_fds=(lock_fd,)` to `bd` subprocesses.
     """
     lock_path = beads_dir / HOOK_LOCK_NAME
-    if lock_path.is_symlink():
-        try:
-            lock_path.unlink()
-        except OSError:
-            pass
-
     flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(str(lock_path), flags, 0o600)
+    try:
+        fd = os.open(str(lock_path), flags, 0o600)
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise OSError(
+                errno.ELOOP,
+                f"refusing to follow symlinked lock path {lock_path}; remove it manually if stale",
+            ) from exc
+        raise
+
     locked = False
     try:
         deadline = time.monotonic() + max(0.0, timeout_s)
@@ -295,8 +410,10 @@ def lock_store(beads_dir: Path, timeout_s: float) -> Iterator[int]:
                 if exc.errno not in (errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK):
                     raise
                 if time.monotonic() >= deadline:
-                    raise LockTimeoutError(f"timed out after {timeout_s:g}s waiting for {lock_path}") from exc
-                time.sleep(0.05)
+                    raise LockTimeoutError(
+                        f"timed out after {timeout_s:g}s waiting for {lock_path}"
+                    ) from exc
+                time.sleep(min(0.05, max(0.005, deadline - time.monotonic())))
         yield fd
     finally:
         if locked:
@@ -311,10 +428,19 @@ def lock_store(beads_dir: Path, timeout_s: float) -> Iterator[int]:
 
 
 def get_bd_config(
-    bd_path: str, run_dir: Path, key: str, env: dict[str, str], pass_fds: tuple[int, ...] = ()
+    bd_path: str,
+    run_dir: Path,
+    key: str,
+    env: dict[str, str],
+    deadline: float,
+    pass_fds: tuple[int, ...] = (),
 ) -> str | None:
     """Read a `bd config get <key>` setting; return None if unset or unreadable."""
-    timeout_s = _env_float("BEADS_HOOK_PROBE_TIMEOUT", DEFAULT_PROBE_TIMEOUT_S)
+    op_timeout = _bounded_timeout(
+        _env_float("BEADS_HOOK_PROBE_TIMEOUT", DEFAULT_PROBE_TIMEOUT_S), deadline
+    )
+    if op_timeout <= 0.0:
+        return None
     try:
         res = subprocess.run(
             [bd_path, "config", "get", key],
@@ -323,7 +449,7 @@ def get_bd_config(
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
-            timeout=timeout_s,
+            timeout=op_timeout,
             pass_fds=pass_fds,
             check=False,
         )
@@ -342,10 +468,18 @@ def get_bd_config(
 
 
 def list_dolt_remotes(
-    bd_path: str, run_dir: Path, env: dict[str, str], pass_fds: tuple[int, ...] = ()
+    bd_path: str,
+    run_dir: Path,
+    env: dict[str, str],
+    deadline: float,
+    pass_fds: tuple[int, ...] = (),
 ) -> set[str]:
     """Return configured Dolt remote names from `bd dolt remote list`."""
-    timeout_s = _env_float("BEADS_HOOK_PROBE_TIMEOUT", DEFAULT_PROBE_TIMEOUT_S)
+    op_timeout = _bounded_timeout(
+        _env_float("BEADS_HOOK_PROBE_TIMEOUT", DEFAULT_PROBE_TIMEOUT_S), deadline
+    )
+    if op_timeout <= 0.0:
+        return set()
     try:
         res = subprocess.run(
             [bd_path, "dolt", "remote", "list"],
@@ -354,7 +488,7 @@ def list_dolt_remotes(
             stdin=subprocess.DEVNULL,
             capture_output=True,
             text=True,
-            timeout=timeout_s,
+            timeout=op_timeout,
             pass_fds=pass_fds,
             check=False,
         )
@@ -369,7 +503,11 @@ def list_dolt_remotes(
         if not stripped:
             continue
         lower = stripped.lower()
-        if lower.startswith("no remotes configured") or lower.startswith("note:") or lower.startswith("warning:"):
+        if (
+            lower.startswith("no remotes configured")
+            or lower.startswith("note:")
+            or lower.startswith("warning:")
+        ):
             continue
         parts = stripped.split()
         if len(parts) >= 2:
@@ -380,26 +518,34 @@ def list_dolt_remotes(
 
 
 def resolve_pull_remote(
-    bd_path: str, run_dir: Path, env: dict[str, str], pass_fds: tuple[int, ...] = ()
+    bd_path: str,
+    run_dir: Path,
+    env: dict[str, str],
+    deadline: float,
+    pass_fds: tuple[int, ...] = (),
 ) -> str | None:
     """Return remote name to pull from on SessionStart, or None if local-only/no remote."""
-    if get_bd_config(bd_path, run_dir, "dolt.local-only", env, pass_fds=pass_fds) == "true":
+    if get_bd_config(bd_path, run_dir, "dolt.local-only", env, deadline, pass_fds=pass_fds) == "true":
         return None
-    remotes = list_dolt_remotes(bd_path, run_dir, env, pass_fds=pass_fds)
+    remotes = list_dolt_remotes(bd_path, run_dir, env, deadline, pass_fds=pass_fds)
     return "origin" if "origin" in remotes else None
 
 
 def resolve_push_remote(
-    bd_path: str, run_dir: Path, env: dict[str, str], pass_fds: tuple[int, ...] = ()
+    bd_path: str,
+    run_dir: Path,
+    env: dict[str, str],
+    deadline: float,
+    pass_fds: tuple[int, ...] = (),
 ) -> str | None:
     """Return remote name to push to on sync, or None if pushing is disabled/no remote."""
-    if get_bd_config(bd_path, run_dir, "dolt.local-only", env, pass_fds=pass_fds) == "true":
+    if get_bd_config(bd_path, run_dir, "dolt.local-only", env, deadline, pass_fds=pass_fds) == "true":
         return None
-    if get_bd_config(bd_path, run_dir, "no-push", env, pass_fds=pass_fds) == "true":
+    if get_bd_config(bd_path, run_dir, "no-push", env, deadline, pass_fds=pass_fds) == "true":
         return None
-    if get_bd_config(bd_path, run_dir, "dolt.auto-push", env, pass_fds=pass_fds) == "false":
+    if get_bd_config(bd_path, run_dir, "dolt.auto-push", env, deadline, pass_fds=pass_fds) == "false":
         return None
-    remotes = list_dolt_remotes(bd_path, run_dir, env, pass_fds=pass_fds)
+    remotes = list_dolt_remotes(bd_path, run_dir, env, deadline, pass_fds=pass_fds)
     return "origin" if "origin" in remotes else None
 
 
@@ -421,59 +567,93 @@ def cmd_prime(agent: str) -> int:
             _emit_json({})
         return 0
 
+    total_budget = _env_float("BEADS_HOOK_TOTAL_TIMEOUT", DEFAULT_PRIME_TOTAL_TIMEOUT_S)
+    deadline = time.monotonic() + total_budget
+    prime_reserve = min(DEFAULT_PRIME_RESERVE_S, total_budget * 0.5)
+
     env = clean_subprocess_env()
     dirs = extract_workspace_dirs(event, agent)
-    stores = discover_unique_stores(bd_path, dirs, env)
-    if not stores:
-        if agent == "antigravity":
-            _emit_json({})
-        return 0
+    stores, discovery_warnings = discover_unique_stores(bd_path, dirs, env, deadline)
 
     pull_enabled = os.environ.get("BEADS_HOOK_NO_PULL", "").strip() != "1"
-    pull_timeout = _env_float("BEADS_HOOK_PULL_TIMEOUT", DEFAULT_PULL_TIMEOUT_S)
-    prime_timeout = _env_float("BEADS_HOOK_PRIME_TIMEOUT", DEFAULT_PRIME_TIMEOUT_S)
+    pull_cap = _env_float("BEADS_HOOK_PULL_TIMEOUT", DEFAULT_PULL_TIMEOUT_S)
+    prime_cap = _env_float("BEADS_HOOK_PRIME_TIMEOUT", DEFAULT_PRIME_TIMEOUT_S)
 
-    chunks: list[str] = []
-    for run_dir, beads_dir in stores:
+    chunks: list[str] = list(discovery_warnings)
+    for idx, store in enumerate(stores):
+        if _remaining(deadline) <= 0.1:
+            skipped = ", ".join(str(s.run_dir) for s in stores[idx:])
+            chunks.append(
+                f"beads: SessionStart time budget exhausted before priming remaining store(s): {skipped}"
+            )
+            break
+
         if pull_enabled:
-            remote = resolve_pull_remote(bd_path, run_dir, env)
-            if remote:
-                try:
-                    with lock_store(beads_dir, timeout_s=min(2.0, pull_timeout)) as lock_fd:
-                        pull_res = subprocess.run(
-                            [bd_path, "dolt", "pull", "--remote", remote],
-                            cwd=str(run_dir),
-                            env=env,
-                            stdin=subprocess.DEVNULL,
-                            capture_output=True,
-                            text=True,
-                            timeout=pull_timeout,
-                            pass_fds=(lock_fd,),
-                            check=False,
+            # Reserve enough budget for `bd prime` across remaining stores.
+            stores_left = len(stores) - idx
+            pull_budget = min(pull_cap, max(0.0, _remaining(deadline) - prime_reserve))
+            if pull_budget > 0.1 and stores_left > 0:
+                pull_deadline = min(deadline - prime_reserve, time.monotonic() + pull_budget)
+                remote = resolve_pull_remote(bd_path, store.run_dir, env, pull_deadline)
+                if remote:
+                    actual_pull_timeout = _bounded_timeout(pull_cap, pull_deadline)
+                    if actual_pull_timeout <= 0.05:
+                        chunks.append(
+                            f"beads: skipped 'bd dolt pull --remote {remote}' in {store.run_dir} "
+                            "to preserve SessionStart time for 'bd prime' (context may be stale)."
                         )
-                        if pull_res.returncode != 0:
-                            detail = (pull_res.stderr or pull_res.stdout).strip()
+                    else:
+                        try:
+                            lock_wait = min(2.0, actual_pull_timeout * 0.5)
+                            with lock_store(store.beads_dir, timeout_s=lock_wait) as lock_fd:
+                                run_timeout = _bounded_timeout(actual_pull_timeout, pull_deadline)
+                                if run_timeout <= 0.05:
+                                    chunks.append(
+                                        f"beads: skipped 'bd dolt pull --remote {remote}' in {store.run_dir} "
+                                        "(insufficient time remaining; context may be stale)."
+                                    )
+                                else:
+                                    pull_res = subprocess.run(
+                                        [bd_path, "dolt", "pull", "--remote", remote],
+                                        cwd=str(store.run_dir),
+                                        env=env,
+                                        stdin=subprocess.DEVNULL,
+                                        capture_output=True,
+                                        text=True,
+                                        timeout=run_timeout,
+                                        pass_fds=(lock_fd,),
+                                        check=False,
+                                    )
+                                    if pull_res.returncode != 0:
+                                        detail = (pull_res.stderr or pull_res.stdout).strip()
+                                        chunks.append(
+                                            f"beads: 'bd dolt pull --remote {remote}' failed at session start "
+                                            f"(context may be stale): {detail}"
+                                        )
+                        except LockTimeoutError:
                             chunks.append(
-                                f"beads: 'bd dolt pull --remote {remote}' failed at session start "
-                                f"(context may be stale): {detail}"
+                                f"beads: skipped 'bd dolt pull --remote {remote}' at session start "
+                                "(store lock busy; context may be stale)."
                             )
-                except LockTimeoutError:
-                    chunks.append(
-                        f"beads: skipped 'bd dolt pull --remote {remote}' at session start "
-                        "(store lock busy; context may be stale)."
-                    )
-                except subprocess.TimeoutExpired:
-                    chunks.append(
-                        f"beads: 'bd dolt pull --remote {remote}' timed out after {pull_timeout:g}s "
-                        "(context may be stale)."
-                    )
-                except OSError as exc:
-                    chunks.append(f"beads: 'bd dolt pull' could not run at session start: {exc}")
+                        except subprocess.TimeoutExpired:
+                            chunks.append(
+                                f"beads: 'bd dolt pull --remote {remote}' timed out after {run_timeout:g}s "
+                                "(context may be stale)."
+                            )
+                        except OSError as exc:
+                            chunks.append(f"beads: 'bd dolt pull' could not run at session start: {exc}")
+
+        prime_timeout = _bounded_timeout(prime_cap, deadline)
+        if prime_timeout <= 0.05:
+            chunks.append(
+                f"beads: SessionStart time budget exhausted before 'bd prime' in {store.run_dir}."
+            )
+            break
 
         try:
             prime_res = subprocess.run(
                 [bd_path, "prime"],
-                cwd=str(run_dir),
+                cwd=str(store.run_dir),
                 env=env,
                 stdin=subprocess.DEVNULL,
                 capture_output=True,
@@ -520,143 +700,43 @@ def cmd_prime(agent: str) -> int:
 # ---------------------------------------------------------------------------
 
 
-def _split_shell_segments(command: str) -> list[list[str]]:
-    """Split a shell command string into simple command token lists.
-
-    Respects single quotes, double quotes, backslash escapes, `#` comments,
-    and command separators (`;`, `&&`, `||`, `|`, `&`, `\\n`, `(`, `)`).
-    Does not evaluate expansions or attempt full shell simulation.
-    """
-    segments: list[list[str]] = []
-    cur_seg: list[str] = []
-    cur_tok: list[str] = []
-    in_token = False
-    quote: str | None = None
-    i = 0
-    n = len(command)
-
-    def flush_tok() -> None:
-        nonlocal in_token
-        if in_token:
-            cur_seg.append("".join(cur_tok))
-            cur_tok.clear()
-            in_token = False
-
-    def flush_seg() -> None:
-        flush_tok()
-        if cur_seg:
-            segments.append(list(cur_seg))
-            cur_seg.clear()
-
-    while i < n:
-        ch = command[i]
-        if quote == "'":
-            if ch == "'":
-                quote = None
-            else:
-                cur_tok.append(ch)
-            i += 1
-            continue
-        if quote == '"':
-            if ch == "\\" and i + 1 < n and command[i + 1] in {'"', "\\", "$", "`", "\n"}:
-                if command[i + 1] != "\n":
-                    cur_tok.append(command[i + 1])
-                i += 2
-                continue
-            if ch == '"':
-                quote = None
-            else:
-                cur_tok.append(ch)
-            i += 1
-            continue
-
-        # Outside quotes
-        if ch == "\\" and i + 1 < n:
-            if command[i + 1] != "\n":
-                cur_tok.append(command[i + 1])
-                in_token = True
-            i += 2
-            continue
-        if ch in {"'", '"'}:
-            quote = ch
-            in_token = True
-            i += 1
-            continue
-        if ch == "#" and not in_token:
-            # Comment to end of line
-            while i < n and command[i] != "\n":
-                i += 1
-            continue
-        if ch == "\n":
-            flush_seg()
-            i += 1
-            continue
-        if ch in {" ", "\t", "\r"}:
-            flush_tok()
-            i += 1
-            continue
-        if ch in {";", "(", ")"}:
-            flush_seg()
-            i += 1
-            continue
-        if ch in {"&", "|"}:
-            # Preserve redirections like `2>&1`, `&>`, `>|`, `<&` inside tokens
-            prev_ch = command[i - 1] if i > 0 else ""
-            next_ch = command[i + 1] if i + 1 < n else ""
-            if (ch == "&" and (prev_ch in {">", "<"} or next_ch == ">")) or (ch == "|" and prev_ch == ">"):
-                cur_tok.append(ch)
-                in_token = True
-                i += 1
-                continue
-            flush_seg()
-            if next_ch == ch:
-                i += 2
-            else:
-                i += 1
-            continue
-
-        cur_tok.append(ch)
-        in_token = True
-        i += 1
-
-    flush_seg()
-    return segments
-
-
-def _segment_invokes_bd_edit(tokens: list[str], depth: int = 0) -> bool:
+def _segment_invokes_bd_edit(tokens: list[Token], depth: int = 0) -> bool:
     """Return True if a single shell command segment invokes interactive `bd edit`."""
     idx = 0
     n = len(tokens)
 
-    # Strip leading redirections, env assignments, and common wrapper commands.
+    # Strip leading shell control keywords, redirections, env assignments, and wrappers.
     while idx < n:
         tok = tokens[idx]
-        if REDIR_OP_RE.match(tok):
+        if tok.is_redir:
             idx += 2
             continue
-        if REDIR_ATTACHED_RE.match(tok):
+        if not tok.quoted and tok.text in CONTROL_KEYWORDS:
             idx += 1
             continue
-        if ENV_ASSIGN_RE.match(tok):
+        if not tok.quoted and ENV_ASSIGN_RE.match(tok.text):
             idx += 1
             continue
 
-        base = os.path.basename(tok)
+        base = os.path.basename(tok.text)
         if base in WRAPPER_COMMANDS:
             val_flags = WRAPPER_VALUE_FLAGS.get(base, set())
             idx += 1
             while idx < n:
                 w = tokens[idx]
-                if w == "--":
-                    idx += 1
-                    break
-                if base == "env" and ENV_ASSIGN_RE.match(w):
-                    idx += 1
-                    continue
-                if w in val_flags:
+                if w.is_redir:
                     idx += 2
                     continue
-                if w.startswith("-") and len(w) > 1:
+                if w.text == "--":
+                    idx += 1
+                    break
+                if base == "env" and not w.quoted and ENV_ASSIGN_RE.match(w.text):
+                    idx += 1
+                    continue
+                if w.text in val_flags:
+                    idx += 2
+                    continue
+                if w.text.startswith("-") and len(w.text) > 1:
                     idx += 1
                     continue
                 break
@@ -667,16 +747,21 @@ def _segment_invokes_bd_edit(tokens: list[str], depth: int = 0) -> bool:
             j = idx + 1
             while j < n:
                 arg = tokens[j]
-                if arg == "--":
-                    break
-                if arg == "-c" or (arg.startswith("-") and not arg.startswith("--") and "c" in arg[1:]):
-                    if j + 1 < n:
-                        return contains_interactive_bd_edit(tokens[j + 1], depth=depth + 1)
-                    return False
-                if arg in {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}:
+                if arg.is_redir:
                     j += 2
                     continue
-                if arg.startswith("-") or arg.startswith("+"):
+                if arg.text == "--":
+                    break
+                if arg.text == "-c" or (
+                    arg.text.startswith("-") and not arg.text.startswith("--") and "c" in arg.text[1:]
+                ):
+                    if j + 1 < n:
+                        return contains_interactive_bd_edit(tokens[j + 1].text, depth=depth + 1)
+                    return False
+                if arg.text in {"-o", "+o", "-O", "+O", "--rcfile", "--init-file"}:
+                    j += 2
+                    continue
+                if arg.text.startswith("-") or arg.text.startswith("+"):
                     j += 1
                     continue
                 break
@@ -687,49 +772,58 @@ def _segment_invokes_bd_edit(tokens: list[str], depth: int = 0) -> bool:
     if idx >= n:
         return False
 
-    if os.path.basename(tokens[idx]) != "bd":
+    if os.path.basename(tokens[idx].text) != "bd":
         return False
 
-    # Walk past `bd` global flags to find the subcommand.
+    # Walk past `bd` global flags (and interspersed redirections) to find the subcommand.
     idx += 1
     while idx < n:
         tok = tokens[idx]
-        if tok in {"-h", "--help"}:
-            return False
-        if tok == "--":
-            idx += 1
-            break
-        if tok in BD_VALUE_FLAGS:
+        if tok.is_redir:
             idx += 2
             continue
-        if tok in BD_BOOL_FLAGS:
+        if tok.text in {"-h", "--help"}:
+            return False
+        if tok.text == "--":
+            idx += 1
+            break
+        if tok.text in BD_VALUE_FLAGS:
+            idx += 2
+            continue
+        if tok.text in BD_BOOL_FLAGS:
             idx += 1
             continue
-        if tok.startswith("--") and "=" in tok:
+        if tok.text.startswith("--") and "=" in tok.text:
             idx += 1
             continue
-        if tok.startswith("-"):
+        if tok.text.startswith("-"):
             idx += 1
             continue
         break
 
-    if idx >= n or tokens[idx] != "edit":
+    if idx >= n or tokens[idx].text != "edit":
         return False
 
     # Allow `bd edit --help` / `bd edit -h`.
     rest = tokens[idx + 1 :]
-    for tok in rest:
-        if tok == "--":
+    k = 0
+    while k < len(rest):
+        tok = rest[k]
+        if tok.is_redir:
+            k += 2
+            continue
+        if tok.text == "--":
             break
-        if tok in {"-h", "--help"}:
+        if tok.text in {"-h", "--help"}:
             return False
+        k += 1
     return True
 
 
 def contains_interactive_bd_edit(command: str, depth: int = 0) -> bool:
-    if not command or "bd" not in command or "edit" not in command:
+    if not command or not command.strip():
         return False
-    for seg in _split_shell_segments(command):
+    for seg in split_shell_segments(command):
         if _segment_invokes_bd_edit(seg, depth=depth):
             return True
     return False
@@ -781,28 +875,38 @@ def cmd_guard(agent: str) -> int:
 
 def _sync_one_store(
     bd_path: str,
-    run_dir: Path,
-    beads_dir: Path,
+    store: StoreTarget,
     agent: str,
     event_name: str,
     env: dict[str, str],
-    lock_timeout: float,
-    commit_timeout: float,
-    push_timeout: float,
+    deadline: float,
+    lock_cap: float,
+    commit_cap: float,
+    push_cap: float,
 ) -> list[str]:
     warnings: list[str] = []
-    try:
-        lock_ctx = lock_store(beads_dir, timeout_s=lock_timeout)
-    except Exception as exc:
-        return [f"beads: could not lock {beads_dir}: {exc}"]
+    lock_timeout = _bounded_timeout(lock_cap, deadline)
+    if lock_timeout <= 0.05:
+        return [
+            f"beads: sync time budget exhausted before locking {store.beads_dir}; "
+            "run 'bd dolt commit' (and 'bd dolt push' if configured) manually."
+        ]
 
     try:
-        with lock_ctx as lock_fd:
+        with lock_store(store.beads_dir, timeout_s=lock_timeout) as lock_fd:
+            commit_timeout = _bounded_timeout(commit_cap, deadline)
+            if commit_timeout <= 0.05:
+                warnings.append(
+                    f"beads: sync time budget exhausted before 'bd dolt commit' in {store.run_dir}; "
+                    "run 'bd dolt commit' manually."
+                )
+                return warnings
+
             commit_msg = f"bd: sync via {agent} {event_name}"
             try:
                 commit_res = subprocess.run(
                     [bd_path, "dolt", "commit", "-m", commit_msg],
-                    cwd=str(run_dir),
+                    cwd=str(store.run_dir),
                     env=env,
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
@@ -813,24 +917,32 @@ def _sync_one_store(
                 )
             except subprocess.TimeoutExpired:
                 warnings.append(
-                    f"beads: 'bd dolt commit' timed out after {commit_timeout:g}s in {run_dir}; "
+                    f"beads: 'bd dolt commit' timed out after {commit_timeout:g}s in {store.run_dir}; "
                     "run 'bd dolt commit' manually."
                 )
                 return warnings
             except OSError as exc:
-                warnings.append(f"beads: 'bd dolt commit' failed to start in {run_dir}: {exc}")
+                warnings.append(f"beads: 'bd dolt commit' failed to start in {store.run_dir}: {exc}")
                 return warnings
 
             combined_commit = (commit_res.stdout + "\n" + commit_res.stderr).strip()
             if commit_res.returncode != 0 and "nothing to commit" not in combined_commit.lower():
                 warnings.append(
-                    f"beads: 'bd dolt commit' failed in {run_dir} (exit {commit_res.returncode}): "
+                    f"beads: 'bd dolt commit' failed in {store.run_dir} (exit {commit_res.returncode}): "
                     f"{combined_commit}"
                 )
                 return warnings
 
-            remote = resolve_push_remote(bd_path, run_dir, env, pass_fds=(lock_fd,))
+            remote = resolve_push_remote(bd_path, store.run_dir, env, deadline, pass_fds=(lock_fd,))
             if not remote:
+                return warnings
+
+            push_timeout = _bounded_timeout(push_cap, deadline)
+            if push_timeout <= 0.05:
+                warnings.append(
+                    f"beads: sync time budget exhausted before 'bd dolt push --remote {remote}' "
+                    f"in {store.run_dir}; commits are local and NOT on the remote."
+                )
                 return warnings
 
             push_env = dict(env)
@@ -838,7 +950,7 @@ def _sync_one_store(
             try:
                 push_res = subprocess.run(
                     [bd_path, "dolt", "push", "--remote", remote, "--no-adopt"],
-                    cwd=str(run_dir),
+                    cwd=str(store.run_dir),
                     env=push_env,
                     stdin=subprocess.DEVNULL,
                     capture_output=True,
@@ -850,17 +962,17 @@ def _sync_one_store(
             except subprocess.TimeoutExpired:
                 warnings.append(
                     f"beads: 'bd dolt push --remote {remote}' timed out after {push_timeout:g}s "
-                    f"in {run_dir}; commits are local and NOT on the remote."
+                    f"in {store.run_dir}; commits are local and NOT on the remote."
                 )
                 return warnings
             except OSError as exc:
-                warnings.append(f"beads: 'bd dolt push' failed to start in {run_dir}: {exc}")
+                warnings.append(f"beads: 'bd dolt push' failed to start in {store.run_dir}: {exc}")
                 return warnings
 
             if push_res.returncode != 0:
                 detail = (push_res.stdout + "\n" + push_res.stderr).strip()
                 warnings.append(
-                    f"beads: 'bd dolt push --remote {remote}' failed in {run_dir} "
+                    f"beads: 'bd dolt push --remote {remote}' failed in {store.run_dir} "
                     f"(exit {push_res.returncode}); commits are local and NOT on the remote: {detail}"
                 )
     except LockTimeoutError as exc:
@@ -868,7 +980,7 @@ def _sync_one_store(
             f"beads: {exc}; run 'bd dolt commit' (and 'bd dolt push' if configured) manually."
         )
     except OSError as exc:
-        warnings.append(f"beads: could not lock {beads_dir}: {exc}")
+        warnings.append(f"beads: could not lock {store.beads_dir}: {exc}")
 
     return warnings
 
@@ -878,30 +990,52 @@ def cmd_sync(agent: str) -> int:
     bd_path = resolve_bd()
     warnings: list[str] = []
 
+    event_name = str(
+        event.get("hookEventName") or event.get("hook_event_name") or "Stop"
+    ).strip() or "Stop"
+
+    # Defense-in-depth: if legacy PostToolUse wiring invokes this script, do not
+    # run full commits/pushes on every tool call.
+    if event_name == "PostToolUse":
+        sys.stderr.write(
+            "beads: beads-sync.sh was invoked on legacy PostToolUse; "
+            "run 'install.sh --wire' to migrate to Stop/SessionEnd.\n"
+        )
+        sys.stderr.flush()
+        if agent == "antigravity":
+            _emit_json({})
+        return 0
+
     if bd_path:
+        total_budget = _env_float("BEADS_HOOK_TOTAL_TIMEOUT", DEFAULT_SYNC_TOTAL_TIMEOUT_S)
+        deadline = time.monotonic() + total_budget
         env = clean_subprocess_env()
         dirs = extract_workspace_dirs(event, agent)
-        stores = discover_unique_stores(bd_path, dirs, env)
-        event_name = str(
-            event.get("hookEventName") or event.get("hook_event_name") or "Stop"
-        ).strip() or "Stop"
+        stores, discovery_warnings = discover_unique_stores(bd_path, dirs, env, deadline)
+        warnings.extend(discovery_warnings)
 
-        lock_timeout = _env_float("BEADS_HOOK_LOCK_TIMEOUT", DEFAULT_LOCK_TIMEOUT_S)
-        commit_timeout = _env_float("BEADS_HOOK_COMMIT_TIMEOUT", DEFAULT_COMMIT_TIMEOUT_S)
-        push_timeout = _env_float("BEADS_HOOK_PUSH_TIMEOUT", DEFAULT_PUSH_TIMEOUT_S)
+        lock_cap = _env_float("BEADS_HOOK_LOCK_TIMEOUT", DEFAULT_LOCK_TIMEOUT_S)
+        commit_cap = _env_float("BEADS_HOOK_COMMIT_TIMEOUT", DEFAULT_COMMIT_TIMEOUT_S)
+        push_cap = _env_float("BEADS_HOOK_PUSH_TIMEOUT", DEFAULT_PUSH_TIMEOUT_S)
 
-        for run_dir, beads_dir in stores:
+        for idx, store in enumerate(stores):
+            if _remaining(deadline) <= 0.1:
+                skipped = ", ".join(str(s.run_dir) for s in stores[idx:])
+                warnings.append(
+                    f"beads: sync time budget exhausted before remaining store(s): {skipped}"
+                )
+                break
             warnings.extend(
                 _sync_one_store(
                     bd_path=bd_path,
-                    run_dir=run_dir,
-                    beads_dir=beads_dir,
+                    store=store,
                     agent=agent,
                     event_name=event_name,
                     env=env,
-                    lock_timeout=lock_timeout,
-                    commit_timeout=commit_timeout,
-                    push_timeout=push_timeout,
+                    deadline=deadline,
+                    lock_cap=lock_cap,
+                    commit_cap=commit_cap,
+                    push_cap=push_cap,
                 )
             )
 

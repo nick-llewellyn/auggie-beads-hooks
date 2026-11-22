@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Wire, unwire, and inspect Beads hooks in Auggie and Antigravity configs.
+"""Wire, unwire, inspect, and check compatibility of Beads hooks for Auggie and Antigravity.
 
 Invoked by `install.sh` using Python 3.9+ stdlib only (no jq or PCRE regexes).
 """
@@ -17,16 +17,18 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from shell_tokens import Token, split_shell_segments
+
 HOOK_SCRIPT_NAMES = {"beads-prime.sh", "beads-sync.sh", "beads-guard.sh"}
 SHELL_WRAPPERS = {"sh", "bash", "zsh", "dash"}
 GENERIC_WRAPPERS = {"env", "exec", "command", "nohup", "time", "nice"}
+CONTROL_KEYWORDS = {"if", "then", "elif", "else", "do", "{", "!", "coproc"}
 WRAPPER_VALUE_FLAGS: dict[str, set[str]] = {
     "env": {"-u", "-C", "-S"},
     "exec": {"-a"},
     "nice": {"-n"},
 }
 ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
-REDIR_OP_RE = re.compile(r"^(?:\d+)?(?:>>|>\||>&|>|<<<|<<-|<<|<>|<&|<|&>>|&>)$")
 MENTION_RE = re.compile(
     r"(?:^|[/\'\"\s;&|(])beads-(?:prime|sync|guard)\.sh[\'\"]?(?:\s|$|[;&|)<>\`])"
 )
@@ -70,77 +72,52 @@ def _display_line_of(hook: dict[str, Any]) -> str:
     return cmd
 
 
-def _tokenize_segments(line: str) -> list[list[str]]:
-    """Tokenize a shell command line into simple command segments."""
-    try:
-        lex = shlex.shlex(line, posix=True, punctuation_chars=";&|()")
-        lex.whitespace_split = False
-        lex.commenters = "#"
-        raw_tokens = list(lex)
-    except ValueError:
-        # Unclosed quote or exotic syntax: fall back to whitespace splitting.
-        raw_tokens = line.split()
-
-    segments: list[list[str]] = []
-    cur: list[str] = []
-    for tok in raw_tokens:
-        if tok in {";", "&&", "||", "|", "&", "(", ")", "\n"}:
-            if cur:
-                segments.append(cur)
-                cur = []
-        else:
-            cur.append(tok)
-    if cur:
-        segments.append(cur)
-    return segments
+def _matched_hook_script(tok: Token) -> str | None:
+    if tok.is_redir:
+        return None
+    base = os.path.basename(tok.text)
+    return base if base in HOOK_SCRIPT_NAMES else None
 
 
-def _strip_redirection_suffix(tok: str) -> str:
-    # Handle cases like `/old/beads-sync.sh>/dev/null` when fallback-split.
-    for op in ("&>>", "&>", ">>", ">|", ">&", "<<<", "<<", "<>", "<&", ">", "<"):
-        pos = tok.find(op)
-        if pos > 0:
-            return tok[:pos]
-    return tok
-
-
-def _is_hook_script(tok: str) -> bool:
-    cleaned = _strip_redirection_suffix(tok)
-    return os.path.basename(cleaned) in HOOK_SCRIPT_NAMES
-
-
-def _segment_runs_our_hook(tokens: list[str], depth: int = 0) -> bool:
+def _segment_hook_scripts(tokens: list[Token], depth: int = 0) -> set[str]:
+    """Return the set of our hook script basenames executed by `tokens`."""
     idx = 0
     n = len(tokens)
     while idx < n:
         tok = tokens[idx]
-        if REDIR_OP_RE.match(tok):
+        if tok.is_redir:
             idx += 2
             continue
-        if ENV_ASSIGN_RE.match(tok):
+        if not tok.quoted and tok.text in CONTROL_KEYWORDS:
+            idx += 1
+            continue
+        if not tok.quoted and ENV_ASSIGN_RE.match(tok.text):
             idx += 1
             continue
 
-        base = os.path.basename(tok)
+        base = os.path.basename(tok.text)
         if base in GENERIC_WRAPPERS:
-            if base == "command" and idx + 1 < n and tokens[idx + 1] in {"-v", "-V"}:
-                return False
+            if base == "command" and idx + 1 < n and tokens[idx + 1].text in {"-v", "-V"}:
+                return set()
             val_flags = WRAPPER_VALUE_FLAGS.get(base, set())
             idx += 1
             while idx < n:
                 w = tokens[idx]
-                if w == "--":
-                    idx += 1
-                    break
-                if base == "env" and ENV_ASSIGN_RE.match(w):
-                    idx += 1
-                    continue
-                if w in val_flags:
+                if w.is_redir:
                     idx += 2
                     continue
-                if w.startswith("-") and len(w) > 1:
-                    if base == "command" and ("v" in w[1:] or "V" in w[1:]):
-                        return False
+                if w.text == "--":
+                    idx += 1
+                    break
+                if base == "env" and not w.quoted and ENV_ASSIGN_RE.match(w.text):
+                    idx += 1
+                    continue
+                if w.text in val_flags:
+                    idx += 2
+                    continue
+                if w.text.startswith("-") and len(w.text) > 1:
+                    if base == "command" and ("v" in w.text[1:] or "V" in w.text[1:]):
+                        return set()
                     idx += 1
                     continue
                 break
@@ -151,72 +128,80 @@ def _segment_runs_our_hook(tokens: list[str], depth: int = 0) -> bool:
             reads_stdin = False
             while j < n:
                 arg = tokens[j]
-                if arg in {"--help", "--version", "-n", "--noexec"}:
-                    return False
-                if arg == "-o" and j + 1 < n:
-                    if tokens[j + 1].lower().replace("_", "").replace("-", "") == "noexec":
-                        return False
+                if arg.is_redir:
+                    break
+                if arg.text in {"--help", "--version", "-n", "--noexec"}:
+                    return set()
+                if arg.text == "-o" and j + 1 < n:
+                    if tokens[j + 1].text.lower().replace("_", "").replace("-", "") == "noexec":
+                        return set()
                     j += 2
                     continue
-                if arg in {"+o", "-O", "+O", "--rcfile", "--init-file"}:
+                if arg.text in {"+o", "-O", "+O", "--rcfile", "--init-file"}:
                     j += 2
                     continue
-                if arg == "--":
+                if arg.text == "--":
                     j += 1
                     break
-                if arg.startswith("-") and not arg.startswith("--"):
-                    flags = arg[1:]
+                if arg.text.startswith("-") and not arg.text.startswith("--"):
+                    flags = arg.text[1:]
                     if "n" in flags:
-                        return False
+                        return set()
                     if "c" in flags:
                         if j + 1 < n and depth < 2:
-                            return runs_our_hook_line(tokens[j + 1], depth=depth + 1)
-                        return False
+                            return executed_hook_scripts(tokens[j + 1].text, depth=depth + 1)
+                        return set()
                     if "s" in flags:
                         reads_stdin = True
                     j += 1
                     continue
-                if arg.startswith("--"):
+                if arg.text.startswith("--"):
                     j += 1
                     continue
                 break
+
             if reads_stdin:
                 # Shell reads stdin (`bash -s < script`); ignore positional args, check `<` redirect.
                 for k in range(j, n - 1):
-                    if tokens[k] in {"<", "0<"} and _is_hook_script(tokens[k + 1]):
-                        return True
-                return False
+                    if tokens[k].is_redir and tokens[k].text in {"<", "0<"}:
+                        hit = _matched_hook_script(tokens[k + 1])
+                        if hit:
+                            return {hit}
+                return set()
+
             if j < n:
-                if tokens[j] in {"<", "0<"} and j + 1 < n:
+                if tokens[j].is_redir and tokens[j].text in {"<", "0<"} and j + 1 < n:
                     # Only if no script operand follows after output redirects
                     candidate = tokens[j + 1]
                     k = j + 2
                     while k < n:
-                        if REDIR_OP_RE.match(tokens[k]):
+                        if tokens[k].is_redir:
                             k += 2
                         else:
-                            return False
-                    return _is_hook_script(candidate)
-                return _is_hook_script(tokens[j])
-            return False
+                            return set()
+                    hit = _matched_hook_script(candidate)
+                    return {hit} if hit else set()
+                hit = _matched_hook_script(tokens[j])
+                return {hit} if hit else set()
+            return set()
 
-        return _is_hook_script(tok)
+        hit = _matched_hook_script(tok)
+        return {hit} if hit else set()
 
-    return False
+    return set()
+
+
+def executed_hook_scripts(line: str, depth: int = 0) -> set[str]:
+    if not line or not line.strip():
+        return set()
+    found: set[str] = set()
+    for seg in split_shell_segments(line):
+        found.update(_segment_hook_scripts(seg, depth=depth))
+    return found
 
 
 def runs_our_hook_line(line: str, depth: int = 0) -> bool:
-    if not line or "beads-" not in line:
-        return False
-    # Ignore heredoc bodies by truncating at first `<<` line break.
-    if "<<" in line and "\n" in line:
-        head = line.split("\n", 1)[0]
-        if re.search(r"<<-?\s*\S+", head):
-            line = head
-    for seg in _tokenize_segments(line):
-        if _segment_runs_our_hook(seg, depth=depth):
-            return True
-    return False
+    return bool(executed_hook_scripts(line, depth=depth))
 
 
 def is_our_auggie_hook(hook: dict[str, Any]) -> bool:
@@ -301,6 +286,123 @@ def _print_auggie_mentions(data: dict[str, Any]) -> None:
             "but do not run them, as far as this can tell, so --wire and --unwire leave "
             "them in place. Remove any that runs these hooks by hand."
         )
+
+
+def _hook_targets_prefix(hook: dict[str, Any], prefix: Path | None) -> bool:
+    if prefix is None:
+        return True
+    line = _command_line_of(hook)
+    resolved_prefix = prefix.resolve()
+    candidates = {
+        str(resolved_prefix / "current"),
+        str(Path(os.path.abspath(str(prefix))) / "current"),
+    }
+    home = str(Path.home().resolve())
+    for c in list(candidates):
+        if c.startswith(home + "/"):
+            candidates.add("~" + c[len(home) :])
+    if any(c in line for c in candidates):
+        return True
+    # Also resolve symlinked path prefixes (e.g. /tmp vs /private/tmp on macOS)
+    for seg in split_shell_segments(line):
+        for tok in seg:
+            if tok.is_redir:
+                continue
+            if os.path.basename(tok.text) in HOOK_SCRIPT_NAMES:
+                expanded = os.path.expanduser(tok.text)
+                parts = Path(expanded).parts
+                if "current" in parts:
+                    idx = parts.index("current")
+                    if idx > 0:
+                        hook_prefix = Path(*parts[:idx])
+                        try:
+                            if hook_prefix.resolve() == resolved_prefix:
+                                return True
+                        except OSError:
+                            pass
+    return False
+
+
+def check_transition_compat(
+    settings_path: Path,
+    agy_hooks_path: Path,
+    target_layout: str,
+    will_wire: bool,
+    target_tag: str,
+    prefix: Path | None = None,
+) -> None:
+    """Guard against switching `current` to a layout incompatible with active wiring."""
+    if target_layout == "legacy":
+        if will_wire:
+            die(
+                f"cannot --wire legacy release {target_tag} with this installer; "
+                f"run 'install.sh --agent all --unwire', then 'install.sh {target_tag}', "
+                "then run that release's own 'install.sh --wire'."
+            )
+        issues: list[str] = []
+        if settings_path.exists():
+            data = load_json_object(settings_path)
+            hooks = data.get("hooks")
+            if isinstance(hooks, dict):
+                for event, entries in hooks.items():
+                    if not isinstance(entries, list):
+                        continue
+                    for entry in entries:
+                        for h in _iter_event_hooks(entry):
+                            if not _hook_targets_prefix(h, prefix):
+                                continue
+                            scripts = executed_hook_scripts(_command_line_of(h))
+                            if "beads-guard.sh" in scripts:
+                                issues.append(
+                                    f"{settings_path} wires beads-guard.sh on {event}, "
+                                    f"which does not exist in legacy release {target_tag}"
+                                )
+        if agy_hooks_path.exists():
+            agy_data = load_json_object(agy_hooks_path)
+            group = agy_data.get(ANTIGRAVITY_GROUP_NAME)
+            if isinstance(group, dict):
+                targets_here = False
+                for entries in group.values():
+                    if not isinstance(entries, list):
+                        continue
+                    for entry in entries:
+                        for h in _iter_event_hooks(entry):
+                            if _hook_targets_prefix(h, prefix):
+                                targets_here = True
+                if targets_here:
+                    issues.append(
+                        f"{agy_hooks_path} wires the '{ANTIGRAVITY_GROUP_NAME}' hook group, "
+                        f"which legacy release {target_tag} does not support"
+                    )
+        if issues:
+            detail = "\n  - ".join(issues)
+            die(
+                f"refusing to switch 'current' to legacy release {target_tag} while incompatible "
+                f"wiring is active:\n  - {detail}\n"
+                "Unwire first with 'install.sh --agent all --unwire', install the legacy tag, "
+                "then wire with that release's own install.sh."
+            )
+        return
+
+    # target_layout == "new"
+    if not will_wire and settings_path.exists():
+        data = load_json_object(settings_path)
+        hooks = data.get("hooks")
+        if isinstance(hooks, dict):
+            post_entries = hooks.get("PostToolUse")
+            if isinstance(post_entries, list):
+                for entry in post_entries:
+                    for h in _iter_event_hooks(entry):
+                        if not _hook_targets_prefix(h, prefix):
+                            continue
+                        if "beads-sync.sh" in executed_hook_scripts(_command_line_of(h)):
+                            die(
+                                f"refusing to switch 'current' to {target_tag} while {settings_path} "
+                                "still has legacy PostToolUse wiring for beads-sync.sh.\n"
+                                f"Re-run with '--wire' (e.g. 'install.sh {target_tag} --wire' or "
+                                f"'install.sh {target_tag} --agent all --wire') to migrate wiring "
+                                "to PreToolUse/Stop/SessionEnd."
+                            )
 
 
 def wire_auggie(settings_path: Path, hooks_dir: Path | None, wire: bool) -> None:
@@ -475,21 +577,35 @@ def status_antigravity(hooks_path: Path) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="wiring.py")
-    parser.add_argument("action", choices=("wire", "unwire", "status"))
+    parser.add_argument("action", choices=("wire", "unwire", "status", "check-compat"))
     parser.add_argument("--agent", choices=("auggie", "antigravity", "all"), default="auggie")
     parser.add_argument("--settings", required=True)
     parser.add_argument("--antigravity-hooks", required=True)
     parser.add_argument("--hooks-dir", default="")
+    parser.add_argument("--prefix", default="")
+    parser.add_argument("--target-layout", choices=("new", "legacy"), default="new")
+    parser.add_argument("--will-wire", choices=("0", "1"), default="0")
+    parser.add_argument("--target-tag", default="")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
 
     settings_path = Path(args.settings)
     agy_hooks_path = Path(args.antigravity_hooks)
     hooks_dir = Path(args.hooks_dir) if args.hooks_dir else None
+    prefix_path = Path(args.prefix) if args.prefix else None
 
     do_auggie = args.agent in ("auggie", "all")
     do_agy = args.agent in ("antigravity", "all")
 
-    if args.action == "wire":
+    if args.action == "check-compat":
+        check_transition_compat(
+            settings_path=settings_path,
+            agy_hooks_path=agy_hooks_path,
+            target_layout=args.target_layout,
+            will_wire=args.will_wire == "1",
+            target_tag=args.target_tag or "target",
+            prefix=prefix_path,
+        )
+    elif args.action == "wire":
         if hooks_dir is None:
             die("--hooks-dir is required for wire")
         if do_auggie:

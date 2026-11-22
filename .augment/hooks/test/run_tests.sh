@@ -23,6 +23,7 @@ import sys
 for p in sys.argv[1:]:
     compile(open(p, "rb").read(), p, "exec")
 ' \
+  "$HOOKS_DIR/lib/shell_tokens.py" \
   "$HOOKS_DIR/lib/beads_hook.py" \
   "$HOOKS_DIR/lib/wiring.py" \
   "$TEST_DIR/hook_test.py"

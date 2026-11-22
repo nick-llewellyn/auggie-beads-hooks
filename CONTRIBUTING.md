@@ -39,12 +39,13 @@ and by AI agents. "Must" marks a rule; the rest is guidance.
 
 ## Filing an issue
 
-Write the body to a file, so that backticks, `$` and quotes reach GitHub
-unchanged, then file it:
+Write the title and body to files (for example with single-quoted heredocs
+`<<'EOF'`) so that backticks, `$()` and quotes reach GitHub unchanged rather
+than being evaluated by your shell, then file it:
 
 ```bash
 gh issue create -R nick-llewellyn/auggie-beads-hooks \
-  --title "<Part>: <what it does wrong>" \
+  --title "$(cat title.txt)" \
   --label bug \
   --body-file issue.md
 ```
@@ -102,9 +103,13 @@ In `## Reproduce`:
    3.2.57, Python 3.13`.
 2. **A minimal case** as a `console` block, run in scratch directories
    (`mktemp -d`) with a stubbed `bd` that logs its calls. To run a hook on
-   its own, pipe it the event as JSON (`hook_event_name`, `workspace_roots`
-   or `cwd`, `tool_input`), passing `--agent antigravity` when reproducing an
-   Antigravity-specific path.
+   its own, pipe it the event as JSON using the fields that agent reads:
+   - **Auggie (default):** `hook_event_name`, `workspace_roots` (or `cwd`,
+     `tool_input.cwd`, `AUGMENT_PROJECT_DIR`), and `tool_input` for
+     `beads-guard.sh`.
+   - **Antigravity (`--agent antigravity`):** `hook_event_name`,
+     `workspacePaths` or `cwd` (`workspace_roots` is ignored in Antigravity
+     mode), and `tool_input` for `beads-guard.sh`.
 3. **The output as printed**, with any `beads:` warning verbatim and the exit
    code. Shorten local paths to `…/` or `path/to/`.
 4. **Expected and actual behaviour**, if the output alone does not make the
@@ -129,12 +134,16 @@ Agents filing issues here must also:
 For the maintainer, and agents working in this repository with access to its
 store. Each GitHub issue taken on gets one bead:
 
+Write the title, description and acceptance text to files (for example with
+single-quoted `<<'EOF'` heredocs) and pass their quoted expansions, so
+backticks and `$()` in pasted issue text are never executed by the shell:
+
 ```bash
 bd create --type=bug --priority=2 --labels=bug \
   --external-ref=gh-<N> \
-  --title="Fix #<N>: <the issue's title>" \
-  --description="GitHub #<N>: https://github.com/nick-llewellyn/auggie-beads-hooks/issues/<N>. Filed <YYYY-MM-DD>. <What goes wrong, the proposed fix, and the cases that pin it.>" \
-  --acceptance="<The checks that show it is fixed, such as new hook_test.py cases passing under /bin/bash .augment/hooks/test/run_tests.sh.>"
+  --title="$(cat title.txt)" \
+  --description="$(cat desc.txt)" \
+  --acceptance="$(cat acceptance.txt)"
 ```
 
 Then comment on the issue: ``Tracked as bead `abh-<id>`.``
@@ -228,9 +237,18 @@ quoted heredoc or `printf`.
 The matching bead (hypothetical):
 
 ```bash
+cat <<'EOF' > title.txt
+Fix #<N>: beads-guard.sh blocks `bd edit` inside a here-string
+EOF
+cat <<'EOF' > desc.txt
+GitHub #<N>: https://github.com/nick-llewellyn/auggie-beads-hooks/issues/<N>. Filed <YYYY-MM-DD>. shell_tokens.py treats a here-string payload after <<< as a command word, causing beads-guard.sh to deny literal 'bd edit' text.
+EOF
+cat <<'EOF' > acceptance.txt
+New hook_test.py cases for here-string allow and chained command deny pass under /bin/bash .augment/hooks/test/run_tests.sh.
+EOF
 bd create --type=bug --priority=2 --labels=bug \
   --external-ref=gh-<N> \
-  --title="Fix #<N>: beads-guard.sh blocks bd edit inside a here-string" \
-  --description="GitHub #<N>: https://github.com/nick-llewellyn/auggie-beads-hooks/issues/<N>. Filed <YYYY-MM-DD>. shell_tokens.py treats a here-string payload after <<< as a command word, causing beads-guard.sh to deny literal 'bd edit' text." \
-  --acceptance="New hook_test.py cases for here-string allow and chained command deny pass under /bin/bash .augment/hooks/test/run_tests.sh."
+  --title="$(cat title.txt)" \
+  --description="$(cat desc.txt)" \
+  --acceptance="$(cat acceptance.txt)"
 ```

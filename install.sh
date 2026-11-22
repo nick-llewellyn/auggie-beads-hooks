@@ -188,12 +188,12 @@ wire() {
   [ -x "$PREFIX/current/.augment/hooks/beads-guard.sh" ] ||
     die "current release does not include beads-guard.sh; install a newer release before wiring"
   local helper
-  helper=$(find_wiring_helper)
+  helper=$(find_wiring_helper) || return 1
   python3 -B "$helper" wire \
     --agent "$AGENT" \
     --settings "$SETTINGS" \
     --antigravity-hooks "$ANTIGRAVITY_HOOKS" \
-    --hooks-dir "$PREFIX/current/.augment/hooks"
+    --hooks-dir "$PREFIX/current/.augment/hooks" || return 1
   if [ "$AGENT" = auggie ] || [ "$AGENT" = all ]; then
     echo "Remove any other wiring of these hooks, such as a project's" \
       ".augment/settings.json entries: Auggie runs every matching hook, so" \
@@ -232,11 +232,26 @@ status() {
     --antigravity-hooks "$ANTIGRAVITY_HOOKS"
 }
 
+PREV_CURRENT=
 if [ -n "$TAG" ]; then
+  if [ -d "$PREFIX" ]; then
+    _p=$(cd "$PREFIX" && pwd -P)
+    [ -L "$_p/current" ] && PREV_CURRENT=$(readlink "$_p/current" || true)
+  fi
   install_release
 fi
 if [ "$WIRE" -eq 1 ]; then
-  wire
+  if ! (wire); then
+    if [ -n "$TAG" ]; then
+      if [ -n "$PREV_CURRENT" ]; then
+        link_current "$PREV_CURRENT"
+        echo "install.sh: restored current release to $PREV_CURRENT after wiring failure" >&2
+      else
+        rm -f "$PREFIX/current"
+      fi
+    fi
+    exit 1
+  fi
 elif [ "$UNWIRE" -eq 1 ]; then
   unwire
 elif [ "$STATUS" -eq 1 ]; then

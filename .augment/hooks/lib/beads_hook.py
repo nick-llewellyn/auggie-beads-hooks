@@ -232,7 +232,7 @@ def _resolve_db_identity(candidate_dir: Path, beads_dir: Path, where_stdout: str
         source_db = _read_dolt_database_from_metadata(local_beads) or ""
 
     target_db = _read_dolt_database_from_metadata(beads_dir) or ""
-    effective_db = source_db or where_db or target_db or str(beads_dir)
+    effective_db = source_db or target_db or where_db or str(beads_dir)
     return effective_db
 
 
@@ -592,26 +592,39 @@ def cmd_prime(agent: str) -> int:
 
     env = clean_subprocess_env()
     dirs = extract_workspace_dirs(event, agent)
-    stores, discovery_warnings = discover_unique_stores(bd_path, dirs, env, deadline)
 
     pull_enabled = os.environ.get("BEADS_HOOK_NO_PULL", "").strip() != "1"
     pull_cap = _env_float("BEADS_HOOK_PULL_TIMEOUT", DEFAULT_PULL_TIMEOUT_S)
     prime_cap = _env_float("BEADS_HOOK_PRIME_TIMEOUT", DEFAULT_PRIME_TIMEOUT_S)
 
-    chunks: list[str] = list(discovery_warnings)
-    for idx, store in enumerate(stores):
+    # Interleave discovery and priming per candidate root so slow/failing later
+    # roots cannot consume the startup budget before an earlier healthy store is
+    # primed, while still reserving prime headroom during discovery.
+    seen_keys: set[tuple[Path, str]] = set()
+    chunks: list[str] = []
+    for idx, candidate in enumerate(dirs):
         if _remaining(deadline) <= 0.1:
-            skipped = ", ".join(str(s.run_dir) for s in stores[idx:])
+            skipped = ", ".join(str(d) for d in dirs[idx:])
             chunks.append(
-                f"beads: SessionStart time budget exhausted before priming remaining store(s): {skipped}"
+                f"beads: SessionStart time budget exhausted before checking remaining root(s): {skipped}"
             )
             break
 
+        discovery_deadline = max(time.monotonic() + 0.2, deadline - prime_reserve)
+        store, warning = discover_store(bd_path, candidate, env, min(deadline, discovery_deadline))
+        if warning:
+            chunks.append(warning)
+        if store is None:
+            continue
+
+        dedup_key = (store.beads_dir, store.db_id)
+        if dedup_key in seen_keys:
+            continue
+        seen_keys.add(dedup_key)
+
         if pull_enabled:
-            # Reserve enough budget for `bd prime` across remaining stores.
-            stores_left = len(stores) - idx
             pull_budget = min(pull_cap, max(0.0, _remaining(deadline) - prime_reserve))
-            if pull_budget > 0.1 and stores_left > 0:
+            if pull_budget > 0.1:
                 pull_deadline = min(deadline - prime_reserve, time.monotonic() + pull_budget)
                 remote, pull_probe_err = resolve_pull_remote(bd_path, store.run_dir, env, pull_deadline)
                 if pull_probe_err:
@@ -635,7 +648,7 @@ def cmd_prime(agent: str) -> int:
                                     )
                                 else:
                                     pull_res = subprocess.run(
-                                        [bd_path, "dolt", "pull", "--remote", remote],
+                                        [bd_path, "dolt", "pull", "--sandbox", "--remote", remote],
                                         cwd=str(store.run_dir),
                                         env=env,
                                         stdin=subprocess.DEVNULL,
@@ -926,7 +939,7 @@ def _sync_one_store(
             commit_msg = f"bd: sync via {agent} {event_name}"
             try:
                 commit_res = subprocess.run(
-                    [bd_path, "dolt", "commit", "-m", commit_msg],
+                    [bd_path, "dolt", "commit", "--sandbox", "-m", commit_msg],
                     cwd=str(store.run_dir),
                     env=env,
                     stdin=subprocess.DEVNULL,

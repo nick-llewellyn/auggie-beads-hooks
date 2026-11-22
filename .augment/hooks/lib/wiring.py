@@ -128,10 +128,17 @@ def _segment_hook_scripts(tokens: list[Token], depth: int = 0) -> set[str]:
         if base in SHELL_WRAPPERS:
             j = idx + 1
             reads_stdin = False
+            final_stdin_script: str | None = None
             while j < n:
                 arg = tokens[j]
                 if arg.is_redir:
-                    break
+                    target = tokens[j + 1] if j + 1 < n else None
+                    if arg.text in STDIN_FILE_REDIRS:
+                        final_stdin_script = _matched_hook_script(target) if target else None
+                    elif arg.text in STDIN_OVERRIDE_REDIRS:
+                        final_stdin_script = None
+                    j += 2
+                    continue
                 if arg.text in {"--help", "--version", "-n", "--noexec"}:
                     return set()
                 if arg.text == "-o" and j + 1 < n:
@@ -162,9 +169,8 @@ def _segment_hook_scripts(tokens: list[Token], depth: int = 0) -> set[str]:
                     continue
                 break
 
-            # Track all positional operands and the FINAL stdin redirection source.
+            # Track remaining positional operands and the FINAL stdin redirection source.
             positionals: list[Token] = []
-            final_stdin_script: str | None = None
             k = j
             while k < n:
                 cur = tokens[k]
@@ -289,6 +295,18 @@ def _print_auggie_mentions(data: dict[str, Any]) -> None:
         )
 
 
+def _expand_shell_path_token(tok: Token) -> str:
+    """Expand `~` and shell environment prefixes (`$HOME`, `$XDG_DATA_HOME`) when not single-quoted."""
+    raw = tok.text
+    if not tok.single_quoted_dollar and "$" in raw:
+        raw = os.path.expandvars(raw)
+    if not tok.quoted and raw.startswith("~"):
+        raw = os.path.expanduser(raw)
+    elif raw.startswith("~/") and not tok.single_quoted_dollar:
+        raw = os.path.expanduser(raw)
+    return raw
+
+
 def _hook_targets_prefix(hook: dict[str, Any], prefix: Path | None) -> bool:
     if prefix is None:
         return True
@@ -304,13 +322,13 @@ def _hook_targets_prefix(hook: dict[str, Any], prefix: Path | None) -> bool:
             candidates.add("~" + c[len(home) :])
     if any(c in line for c in candidates):
         return True
-    # Also resolve symlinked path prefixes (e.g. /tmp vs /private/tmp on macOS)
+    # Also resolve symlinked or env-var-prefixed paths (e.g. /tmp vs /private/tmp, $HOME)
     for seg in split_shell_segments(line):
         for tok in seg:
             if tok.is_redir:
                 continue
             if os.path.basename(tok.text) in HOOK_SCRIPT_NAMES:
-                expanded = os.path.expanduser(tok.text)
+                expanded = _expand_shell_path_token(tok)
                 parts = Path(expanded).parts
                 if "current" in parts:
                     idx = parts.index("current")
@@ -352,7 +370,32 @@ def check_transition_compat(
                         )
 
 
-def wire_auggie(settings_path: Path, hooks_dir: Path | None, wire: bool) -> None:
+def _apply_staged_writes(staged: list[tuple[Path, dict[str, Any]]]) -> list[tuple[Path, bool]]:
+    """Write all staged JSON files atomically, rolling back earlier writes on any failure."""
+    applied: list[tuple[Path, bool, bool, bytes | None]] = []
+    try:
+        for path, data in staged:
+            existed = path.exists()
+            old_bytes = path.read_bytes() if existed else None
+            changed = atomic_write_json(path, data)
+            applied.append((path, changed, existed, old_bytes))
+    except BaseException:
+        # Roll back any files modified earlier in this transaction.
+        for path, changed, existed, old_bytes in reversed(applied):
+            if not changed:
+                continue
+            try:
+                if existed and old_bytes is not None:
+                    path.write_bytes(old_bytes)
+                elif not existed:
+                    path.unlink(missing_ok=True)
+            except OSError:
+                pass
+        raise
+    return [(path, changed) for path, changed, _, _ in applied]
+
+
+def _prepare_auggie_data(settings_path: Path, hooks_dir: Path | None, wire: bool) -> dict[str, Any]:
     prime_cmd = guard_cmd = sync_cmd = ""
     if wire:
         assert hooks_dir is not None
@@ -419,10 +462,62 @@ def wire_auggie(settings_path: Path, hooks_dir: Path | None, wire: bool) -> None
         data["hooks"] = cleaned_hooks
     else:
         data.pop("hooks", None)
+    return data
 
-    changed = atomic_write_json(settings_path, data)
-    print(f"updated {settings_path}" if changed else f"{settings_path} is unchanged")
-    _print_auggie_mentions(data)
+
+def _prepare_antigravity_data(
+    hooks_path: Path, hooks_dir: Path | None, wire: bool
+) -> dict[str, Any] | None:
+    if not wire and not hooks_path.exists():
+        return None
+    data: dict[str, Any] = load_json_object(hooks_path) if hooks_path.exists() else {}
+    if wire:
+        assert hooks_dir is not None
+        prime_cmd = f"{quote_shell_path(str(hooks_dir / 'beads-prime.sh'))} --agent antigravity"
+        guard_cmd = f"{quote_shell_path(str(hooks_dir / 'beads-guard.sh'))} --agent antigravity"
+        sync_cmd = f"{quote_shell_path(str(hooks_dir / 'beads-sync.sh'))} --agent antigravity"
+        data[ANTIGRAVITY_GROUP_NAME] = {
+            "SessionStart": [{"type": "command", "command": prime_cmd, "timeout": 15}],
+            "PreToolUse": [
+                {
+                    "matcher": "run_command",
+                    "hooks": [{"type": "command", "command": guard_cmd, "timeout": 5}],
+                }
+            ],
+            "Stop": [{"type": "command", "command": sync_cmd, "timeout": 60}],
+        }
+    else:
+        data.pop(ANTIGRAVITY_GROUP_NAME, None)
+    return data
+
+
+def wire_all(
+    settings_path: Path,
+    agy_hooks_path: Path,
+    hooks_dir: Path | None,
+    *,
+    do_auggie: bool,
+    do_agy: bool,
+    wire: bool,
+) -> None:
+    """Prepare and validate all selected configs before writing any of them."""
+    staged: list[tuple[Path, dict[str, Any]]] = []
+    aug_data: dict[str, Any] | None = None
+    if do_auggie:
+        aug_data = _prepare_auggie_data(settings_path, hooks_dir, wire=wire)
+        staged.append((settings_path, aug_data))
+    if do_agy:
+        agy_data = _prepare_antigravity_data(agy_hooks_path, hooks_dir, wire=wire)
+        if agy_data is None:
+            print(f"{agy_hooks_path} is unchanged")
+        else:
+            staged.append((agy_hooks_path, agy_data))
+
+    results = _apply_staged_writes(staged)
+    for path, changed in results:
+        print(f"updated {path}" if changed else f"{path} is unchanged")
+        if path == settings_path and aug_data is not None:
+            _print_auggie_mentions(aug_data)
 
 
 def status_auggie(settings_path: Path) -> None:
@@ -446,55 +541,6 @@ def status_auggie(settings_path: Path) -> None:
     else:
         print(f"wired (auggie): none ({settings_path})")
     _print_auggie_mentions(data)
-
-
-def wire_antigravity(hooks_path: Path, hooks_dir: Path | None, wire: bool) -> None:
-    prime_cmd = guard_cmd = sync_cmd = ""
-    if wire:
-        assert hooks_dir is not None
-        prime_cmd = f"{quote_shell_path(str(hooks_dir / 'beads-prime.sh'))} --agent antigravity"
-        guard_cmd = f"{quote_shell_path(str(hooks_dir / 'beads-guard.sh'))} --agent antigravity"
-        sync_cmd = f"{quote_shell_path(str(hooks_dir / 'beads-sync.sh'))} --agent antigravity"
-
-    data: dict[str, Any] = load_json_object(hooks_path) if hooks_path.exists() else {}
-
-    if wire:
-        data[ANTIGRAVITY_GROUP_NAME] = {
-            "SessionStart": [
-                {
-                    "type": "command",
-                    "command": prime_cmd,
-                    "timeout": 15,
-                }
-            ],
-            "PreToolUse": [
-                {
-                    "matcher": "run_command",
-                    "hooks": [
-                        {
-                            "type": "command",
-                            "command": guard_cmd,
-                            "timeout": 5,
-                        }
-                    ],
-                }
-            ],
-            "Stop": [
-                {
-                    "type": "command",
-                    "command": sync_cmd,
-                    "timeout": 60,
-                }
-            ],
-        }
-    else:
-        if not hooks_path.exists():
-            print(f"{hooks_path} is unchanged")
-            return
-        data.pop(ANTIGRAVITY_GROUP_NAME, None)
-
-    changed = atomic_write_json(hooks_path, data)
-    print(f"updated {hooks_path}" if changed else f"{hooks_path} is unchanged")
 
 
 def status_antigravity(hooks_path: Path) -> None:
@@ -552,15 +598,23 @@ def main(argv: list[str] | None = None) -> int:
     elif args.action == "wire":
         if hooks_dir is None:
             die("--hooks-dir is required for wire")
-        if do_auggie:
-            wire_auggie(settings_path, hooks_dir, wire=True)
-        if do_agy:
-            wire_antigravity(agy_hooks_path, hooks_dir, wire=True)
+        wire_all(
+            settings_path,
+            agy_hooks_path,
+            hooks_dir,
+            do_auggie=do_auggie,
+            do_agy=do_agy,
+            wire=True,
+        )
     elif args.action == "unwire":
-        if do_auggie:
-            wire_auggie(settings_path, None, wire=False)
-        if do_agy:
-            wire_antigravity(agy_hooks_path, None, wire=False)
+        wire_all(
+            settings_path,
+            agy_hooks_path,
+            None,
+            do_auggie=do_auggie,
+            do_agy=do_agy,
+            wire=False,
+        )
     elif args.action == "status":
         if do_auggie:
             status_auggie(settings_path)

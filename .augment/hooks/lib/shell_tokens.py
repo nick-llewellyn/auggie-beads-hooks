@@ -11,12 +11,16 @@ Splits a shell command string into simple command segments while preserving:
     `<&`, `<>`, `<<<`, `<<`, `<<-`, plus optional leading fd digits like `2>`)
   - whether a leading `NAME=` / `NAME+=` assignment prefix was unquoted
     independently of whether its value contains quotes
-  - command substitutions (`$(...)` and backticks) in unquoted words,
-    double-quoted strings, and unquoted heredoc bodies, parsed as nested
-    executable contexts without splitting the enclosing command
+  - whether `$` appeared inside single quotes or escaped (so callers can expand
+    `$HOME` / `$XDG_DATA_HOME` only where the shell would expand them)
+  - command substitutions (`$(...)`, backticks), process substitutions
+    (`<(...)`, `>(...)`), and substitutions inside arithmetic expansions
+    (`$((...))`) or unquoted heredocs, parsed as nested executable contexts
+    without splitting the enclosing command
   - heredoc bodies (`<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`, `<<\\EOF`),
-    skipping literal heredoc lines while resuming tokenization after the
-    closing delimiter, and distinguishing here-strings (`<<<`) from heredocs
+    skipping literal heredoc lines (including inside `$(...)` boundary scans)
+    while resuming tokenization after the closing delimiter, and distinguishing
+    here-strings (`<<<`) from heredocs
   - ordinary path/word characters (`+`, `@`, `:`, `%`, `,`, `=`, etc.)
 """
 
@@ -35,6 +39,7 @@ class Token:
     quoted: bool = False
     is_redir: bool = False
     assign_prefix_unquoted: bool = False
+    single_quoted_dollar: bool = False
 
 
 def _read_ansi_c_quote(text: str, pos: int) -> tuple[str, int]:
@@ -67,29 +72,101 @@ def _read_ansi_c_quote(text: str, pos: int) -> tuple[str, int]:
     return "".join(out), i
 
 
-def _read_arith_expansion(text: str, pos: int) -> tuple[str, int]:
-    """Read a `$((...))` arithmetic expansion starting at `$`."""
+def _read_heredoc_delim_inline(text: str, pos: int) -> tuple[str, bool, int]:
+    """Read a heredoc delimiter word starting at `pos` (after `<<` or `<<-`)."""
+    n = len(text)
+    i = pos
+    while i < n and text[i] in " \t":
+        i += 1
+    chars: list[str] = []
+    quoted = False
+    quote: str | None = None
+    while i < n:
+        ch = text[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            else:
+                chars.append(ch)
+            i += 1
+            continue
+        if quote == '"':
+            if ch == "\\" and i + 1 < n and text[i + 1] in {'"', "\\", "$", "`", "\n"}:
+                if text[i + 1] != "\n":
+                    chars.append(text[i + 1])
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+            else:
+                chars.append(ch)
+            i += 1
+            continue
+        if ch == "\\" and i + 1 < n:
+            if text[i + 1] != "\n":
+                chars.append(text[i + 1])
+                quoted = True
+            i += 2
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            quoted = True
+            i += 1
+            continue
+        if ch in " \t\r\n;&|()<>#":
+            break
+        chars.append(ch)
+        i += 1
+    return "".join(chars), quoted, i
+
+
+def _read_arith_expansion(text: str, pos: int) -> tuple[str, int, list[str]]:
+    """Read `$((...))` starting at `$`; return `(raw, end_pos, nested_substitutions)`."""
     n = len(text)
     i = pos + 3
     depth = 2
+    nested: list[str] = []
     while i < n and depth > 0:
-        if text[i] == "\\" and i + 1 < n:
+        ch = text[i]
+        if ch == "\\" and i + 1 < n:
             i += 2
             continue
-        if text[i] == "(":
+        if ch == "$" and i + 1 < n and text[i + 1] == "(":
+            if text.startswith("$((", i):
+                _, i, inner_subs = _read_arith_expansion(text, i)
+                nested.extend(inner_subs)
+            else:
+                inner, i = _read_paren_subst(text, i)
+                nested.append(inner)
+            continue
+        if ch == "`":
+            inner, i = _read_backtick(text, i)
+            nested.append(inner)
+            continue
+        if ch == "(":
             depth += 1
-        elif text[i] == ")":
+            i += 1
+            continue
+        if ch == ")":
             depth -= 1
+            i += 1
+            continue
         i += 1
-    return text[pos:i], i
+    return text[pos:i], i, nested
 
 
-def _read_dollar_paren(text: str, pos: int) -> tuple[str, int]:
-    """Read a `$(...)` command substitution starting at `$`; return `(inner, end_pos)`."""
+def _read_paren_subst(text: str, pos: int) -> tuple[str, int]:
+    """Read `$(...)`, `<(...)`, or `>(...)` starting at `$`/`<`/`>`; return `(inner, end_pos)`.
+
+    Properly skips quotes, nested substitutions, comments, and heredoc bodies
+    inside the substitution so unmatched quotes or `)` in heredoc data never
+    corrupt the closing boundary.
+    """
     n = len(text)
-    i = pos + 2  # skip $(
+    i = pos + 2  # skip $(, <(, or >(
     depth = 1
     quote: str | None = None
+    pending_heredocs: list[tuple[str, bool, bool]] = []
     while i < n and depth > 0:
         ch = text[i]
         if quote == "'":
@@ -107,9 +184,9 @@ def _read_dollar_paren(text: str, pos: int) -> tuple[str, int]:
                 continue
             if ch == "$" and i + 1 < n and text[i + 1] == "(":
                 if text.startswith("$((", i):
-                    _, i = _read_arith_expansion(text, i)
+                    _, i, _ = _read_arith_expansion(text, i)
                 else:
-                    _, i = _read_dollar_paren(text, i)
+                    _, i = _read_paren_subst(text, i)
                 continue
             if ch == "`":
                 _, i = _read_backtick(text, i)
@@ -117,7 +194,7 @@ def _read_dollar_paren(text: str, pos: int) -> tuple[str, int]:
             i += 1
             continue
 
-        # Outside quotes inside $(...)
+        # Outside quotes inside $(...) / <(...) / >(...)
         if ch == "\\" and i + 1 < n:
             i += 2
             continue
@@ -132,8 +209,27 @@ def _read_dollar_paren(text: str, pos: int) -> tuple[str, int]:
             while i < n and text[i] != "\n":
                 i += 1
             continue
+        if ch == "\n":
+            i += 1
+            if pending_heredocs:
+                i, _ = _consume_heredoc_bodies(text, i, pending_heredocs)
+                pending_heredocs.clear()
+            continue
+        if ch == "<" and text.startswith("<<", i) and not text.startswith("<<<", i):
+            strip_tabs = text.startswith("<<-", i)
+            after_op = i + (3 if strip_tabs else 2)
+            delim, delim_quoted, i = _read_heredoc_delim_inline(text, after_op)
+            if delim:
+                pending_heredocs.append((delim, strip_tabs, delim_quoted))
+            continue
+        if ch in {"<", ">"} and i + 1 < n and text[i + 1] == "(":
+            _, i = _read_paren_subst(text, i)
+            continue
         if ch == "$" and text.startswith("$((", i):
-            _, i = _read_arith_expansion(text, i)
+            _, i, _ = _read_arith_expansion(text, i)
+            continue
+        if ch == "$" and i + 1 < n and text[i + 1] == "(":
+            _, i = _read_paren_subst(text, i)
             continue
         if ch == "`":
             _, i = _read_backtick(text, i)
@@ -172,7 +268,7 @@ def _read_backtick(text: str, pos: int) -> tuple[str, int]:
 
 
 def _extract_heredoc_substitutions(body: str) -> list[str]:
-    """Extract executable `$(...)` and backtick substitutions from an unquoted heredoc body."""
+    """Extract executable `$(...)`, `$((...))`, and backtick substitutions from an unquoted heredoc."""
     subs: list[str] = []
     i = 0
     n = len(body)
@@ -183,9 +279,10 @@ def _extract_heredoc_substitutions(body: str) -> list[str]:
             continue
         if ch == "$" and i + 1 < n and body[i + 1] == "(":
             if body.startswith("$((", i):
-                _, i = _read_arith_expansion(body, i)
+                _, i, arith_subs = _read_arith_expansion(body, i)
+                subs.extend(arith_subs)
             else:
-                inner, i = _read_dollar_paren(body, i)
+                inner, i = _read_paren_subst(body, i)
                 subs.append(inner)
             continue
         if ch == "`":
@@ -227,9 +324,10 @@ def _consume_heredoc_bodies(
 def split_shell_segments(command: str, depth: int = 0) -> list[list[Token]]:
     """Split `command` into lists of `Token` representing simple commands.
 
-    Nested command substitutions (`$(...)`, backticks) in unquoted words,
-    double-quoted strings, and unquoted heredocs are appended as their own
-    command segments without splitting the enclosing command.
+    Nested command substitutions (`$(...)`, backticks), process substitutions
+    (`<(...)`, `>(...)`), and substitutions inside `$((...))` or unquoted
+    heredocs are appended as their own command segments without splitting the
+    enclosing command.
     """
     segments: list[list[Token]] = []
     nested_commands: list[str] = []
@@ -239,6 +337,7 @@ def split_shell_segments(command: str, depth: int = 0) -> list[list[Token]]:
     tok_quoted = False
     saw_quote_before_eq = False
     assign_unquoted = False
+    single_quoted_dollar = False
     quote: str | None = None
 
     pending_heredocs: list[tuple[str, bool, bool]] = []
@@ -248,19 +347,28 @@ def split_shell_segments(command: str, depth: int = 0) -> list[list[Token]]:
     n = len(command)
 
     def flush_tok() -> None:
-        nonlocal in_token, tok_quoted, saw_quote_before_eq, assign_unquoted, expect_heredoc_delim
+        nonlocal in_token, tok_quoted, saw_quote_before_eq, assign_unquoted
+        nonlocal single_quoted_dollar, expect_heredoc_delim
         if not in_token:
             return
         word = "".join(cur_chars)
         cur_chars.clear()
         quoted = tok_quoted
         assign_ok = assign_unquoted
+        sq_dollar = single_quoted_dollar
         in_token = False
         tok_quoted = False
         saw_quote_before_eq = False
         assign_unquoted = False
+        single_quoted_dollar = False
         cur_seg.append(
-            Token(word, quoted=quoted, is_redir=False, assign_prefix_unquoted=assign_ok)
+            Token(
+                word,
+                quoted=quoted,
+                is_redir=False,
+                assign_prefix_unquoted=assign_ok,
+                single_quoted_dollar=sq_dollar,
+            )
         )
         if expect_heredoc_delim is not None:
             pending_heredocs.append((word, expect_heredoc_delim, quoted))
@@ -285,12 +393,16 @@ def split_shell_segments(command: str, depth: int = 0) -> list[list[Token]]:
             if ch == "'":
                 quote = None
             else:
+                if ch == "$":
+                    single_quoted_dollar = True
                 cur_chars.append(ch)
             i += 1
             continue
 
         if quote == '"':
             if ch == "\\" and i + 1 < n and command[i + 1] in {'"', "\\", "$", "`", "\n"}:
+                if command[i + 1] == "$":
+                    single_quoted_dollar = True
                 if command[i + 1] != "\n":
                     cur_chars.append(command[i + 1])
                 i += 2
@@ -301,11 +413,12 @@ def split_shell_segments(command: str, depth: int = 0) -> list[list[Token]]:
                 continue
             if ch == "$" and i + 1 < n and command[i + 1] == "(":
                 if command.startswith("$((", i):
-                    raw, i = _read_arith_expansion(command, i)
+                    raw, i, arith_subs = _read_arith_expansion(command, i)
                     cur_chars.append(raw)
+                    nested_commands.extend(arith_subs)
                 else:
                     start = i
-                    inner, i = _read_dollar_paren(command, i)
+                    inner, i = _read_paren_subst(command, i)
                     cur_chars.append(command[start:i])
                     nested_commands.append(inner)
                 continue
@@ -326,6 +439,8 @@ def split_shell_segments(command: str, depth: int = 0) -> list[list[Token]]:
                 continue
             if not assign_unquoted:
                 saw_quote_before_eq = True
+            if command[i + 1] == "$":
+                single_quoted_dollar = True
             cur_chars.append(command[i + 1])
             in_token = True
             tok_quoted = True
@@ -336,6 +451,8 @@ def split_shell_segments(command: str, depth: int = 0) -> list[list[Token]]:
             if not assign_unquoted:
                 saw_quote_before_eq = True
             frag, i = _read_ansi_c_quote(command, i)
+            if "$" in frag:
+                single_quoted_dollar = True
             cur_chars.append(frag)
             in_token = True
             tok_quoted = True
@@ -343,11 +460,12 @@ def split_shell_segments(command: str, depth: int = 0) -> list[list[Token]]:
 
         if ch == "$" and i + 1 < n and command[i + 1] == "(":
             if command.startswith("$((", i):
-                raw, i = _read_arith_expansion(command, i)
+                raw, i, arith_subs = _read_arith_expansion(command, i)
                 cur_chars.append(raw)
+                nested_commands.extend(arith_subs)
             else:
                 start = i
-                inner, i = _read_dollar_paren(command, i)
+                inner, i = _read_paren_subst(command, i)
                 cur_chars.append(command[start:i])
                 nested_commands.append(inner)
             in_token = True
@@ -356,6 +474,15 @@ def split_shell_segments(command: str, depth: int = 0) -> list[list[Token]]:
         if ch == "`":
             start = i
             inner, i = _read_backtick(command, i)
+            cur_chars.append(command[start:i])
+            nested_commands.append(inner)
+            in_token = True
+            continue
+
+        # Process substitutions `<(...)` and `>(...)` stay part of the word without splitting
+        if ch in {"<", ">"} and i + 1 < n and command[i + 1] == "(":
+            start = i
+            inner, i = _read_paren_subst(command, i)
             cur_chars.append(command[start:i])
             nested_commands.append(inner)
             in_token = True
@@ -413,6 +540,7 @@ def split_shell_segments(command: str, depth: int = 0) -> list[list[Token]]:
                 in_token = False
                 saw_quote_before_eq = False
                 assign_unquoted = False
+                single_quoted_dollar = False
             else:
                 flush_tok()
 

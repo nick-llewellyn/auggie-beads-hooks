@@ -104,9 +104,11 @@ In `## Reproduce`:
 2. **A minimal case** as a `console` block, run in scratch directories
    (`mktemp -d`) with a stubbed `bd` that logs its calls. To run a hook on
    its own, pipe it the event as JSON using the fields that agent reads:
-   - **Auggie (default):** `hook_event_name`, `workspace_roots` (or `cwd`,
-     `tool_input.cwd`, `AUGMENT_PROJECT_DIR`), and `tool_input` for
-     `beads-guard.sh`.
+   - **Auggie (default):** `hook_event_name`, `workspace_roots` (or `cwd` /
+     `tool_input.cwd`), and `tool_input` for `beads-guard.sh`. Auggie mode also
+     reads the `AUGMENT_PROJECT_DIR` environment variable, so run scratch
+     reproducers with `env -u AUGMENT_PROJECT_DIR -u BEADS_DIR` to avoid
+     picking up an ambient workspace.
    - **Antigravity (`--agent antigravity`):** `hook_event_name`,
      `workspacePaths` or `cwd` (`workspace_roots` is ignored in Antigravity
      mode), and `toolCall` (`name`, `args.CommandLine`) for `beads-guard.sh`

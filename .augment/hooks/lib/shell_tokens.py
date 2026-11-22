@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
 """Lightweight POSIX-style shell tokenizer for Beads hooks and installer wiring.
 
-Splits a shell command string into simple command segments while accurately
-preserving:
+Splits a shell command string into simple command segments while preserving:
   - single quotes ('...'), double quotes ("..."), and ANSI-C quotes ($'...')
   - backslash escapes and backslash-newline line continuations
   - `#` comments at word boundaries
@@ -10,6 +9,11 @@ preserving:
     strictly distinguished from quoted literals such as `echo ';'`
   - unquoted redirection operators (`>`, `>>`, `>|`, `>&`, `&>`, `&>>`, `<`,
     `<&`, `<>`, `<<<`, `<<`, `<<-`, plus optional leading fd digits like `2>`)
+  - whether a leading `NAME=` / `NAME+=` assignment prefix was unquoted
+    independently of whether its value contains quotes
+  - command substitutions (`$(...)` and backticks) in unquoted words,
+    double-quoted strings, and unquoted heredoc bodies, parsed as nested
+    executable contexts without splitting the enclosing command
   - heredoc bodies (`<<EOF`, `<<-EOF`, `<<'EOF'`, `<<"EOF"`, `<<\\EOF`),
     skipping literal heredoc lines while resuming tokenization after the
     closing delimiter, and distinguishing here-strings (`<<<`) from heredocs
@@ -18,22 +22,11 @@ preserving:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
-REDIR_OPERATORS = {
-    ">",
-    ">>",
-    ">|",
-    ">&",
-    "&>",
-    "&>>",
-    "<",
-    "<&",
-    "<>",
-    "<<<",
-    "<<",
-    "<<-",
-}
+ASSIGN_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?$")
+MAX_SUBST_DEPTH = 4
 
 
 @dataclass(frozen=True)
@@ -41,28 +34,7 @@ class Token:
     text: str
     quoted: bool = False
     is_redir: bool = False
-
-
-def _consume_heredoc_bodies(
-    text: str, pos: int, pending: list[tuple[str, bool]]
-) -> int:
-    """Advance `pos` past all queued heredoc bodies starting after a newline."""
-    n = len(text)
-    for delim, strip_tabs in pending:
-        while pos < n:
-            nl = text.find("\n", pos)
-            if nl == -1:
-                line = text[pos:]
-                pos = n
-            else:
-                line = text[pos:nl]
-                pos = nl + 1
-            candidate = line.rstrip("\r")
-            if strip_tabs:
-                candidate = candidate.lstrip("\t")
-            if candidate == delim:
-                break
-    return pos
+    assign_prefix_unquoted: bool = False
 
 
 def _read_ansi_c_quote(text: str, pos: int) -> tuple[str, int]:
@@ -95,33 +67,203 @@ def _read_ansi_c_quote(text: str, pos: int) -> tuple[str, int]:
     return "".join(out), i
 
 
-def split_shell_segments(command: str) -> list[list[Token]]:
-    """Split `command` into lists of `Token` representing simple commands."""
+def _read_arith_expansion(text: str, pos: int) -> tuple[str, int]:
+    """Read a `$((...))` arithmetic expansion starting at `$`."""
+    n = len(text)
+    i = pos + 3
+    depth = 2
+    while i < n and depth > 0:
+        if text[i] == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if text[i] == "(":
+            depth += 1
+        elif text[i] == ")":
+            depth -= 1
+        i += 1
+    return text[pos:i], i
+
+
+def _read_dollar_paren(text: str, pos: int) -> tuple[str, int]:
+    """Read a `$(...)` command substitution starting at `$`; return `(inner, end_pos)`."""
+    n = len(text)
+    i = pos + 2  # skip $(
+    depth = 1
+    quote: str | None = None
+    while i < n and depth > 0:
+        ch = text[i]
+        if quote == "'":
+            if ch == "'":
+                quote = None
+            i += 1
+            continue
+        if quote == '"':
+            if ch == "\\" and i + 1 < n:
+                i += 2
+                continue
+            if ch == '"':
+                quote = None
+                i += 1
+                continue
+            if ch == "$" and i + 1 < n and text[i + 1] == "(":
+                if text.startswith("$((", i):
+                    _, i = _read_arith_expansion(text, i)
+                else:
+                    _, i = _read_dollar_paren(text, i)
+                continue
+            if ch == "`":
+                _, i = _read_backtick(text, i)
+                continue
+            i += 1
+            continue
+
+        # Outside quotes inside $(...)
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if ch == "$" and i + 1 < n and text[i + 1] == "'":
+            _, i = _read_ansi_c_quote(text, i)
+            continue
+        if ch in {"'", '"'}:
+            quote = ch
+            i += 1
+            continue
+        if ch == "#" and (i == pos + 2 or text[i - 1] in " \t\n;&|("):
+            while i < n and text[i] != "\n":
+                i += 1
+            continue
+        if ch == "$" and text.startswith("$((", i):
+            _, i = _read_arith_expansion(text, i)
+            continue
+        if ch == "`":
+            _, i = _read_backtick(text, i)
+            continue
+        if ch == "(":
+            depth += 1
+            i += 1
+            continue
+        if ch == ")":
+            depth -= 1
+            i += 1
+            continue
+        i += 1
+
+    inner_end = i - 1 if depth == 0 else i
+    return text[pos + 2 : inner_end], i
+
+
+def _read_backtick(text: str, pos: int) -> tuple[str, int]:
+    """Read a `` `...` `` command substitution starting at `` ` ``; return `(inner, end_pos)`."""
+    n = len(text)
+    i = pos + 1
+    out: list[str] = []
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and i + 1 < n and text[i + 1] in {"$", "`", "\\", "\n"}:
+            if text[i + 1] != "\n":
+                out.append(text[i + 1])
+            i += 2
+            continue
+        if ch == "`":
+            return "".join(out), i + 1
+        out.append(ch)
+        i += 1
+    return "".join(out), i
+
+
+def _extract_heredoc_substitutions(body: str) -> list[str]:
+    """Extract executable `$(...)` and backtick substitutions from an unquoted heredoc body."""
+    subs: list[str] = []
+    i = 0
+    n = len(body)
+    while i < n:
+        ch = body[i]
+        if ch == "\\" and i + 1 < n and body[i + 1] in {"$", "`", "\\", "\n"}:
+            i += 2
+            continue
+        if ch == "$" and i + 1 < n and body[i + 1] == "(":
+            if body.startswith("$((", i):
+                _, i = _read_arith_expansion(body, i)
+            else:
+                inner, i = _read_dollar_paren(body, i)
+                subs.append(inner)
+            continue
+        if ch == "`":
+            inner, i = _read_backtick(body, i)
+            subs.append(inner)
+            continue
+        i += 1
+    return subs
+
+
+def _consume_heredoc_bodies(
+    text: str, pos: int, pending: list[tuple[str, bool, bool]]
+) -> tuple[int, list[str]]:
+    """Advance `pos` past queued heredocs; return `(new_pos, nested_substitutions)`."""
+    n = len(text)
+    nested: list[str] = []
+    for delim, strip_tabs, delim_quoted in pending:
+        body_lines: list[str] = []
+        while pos < n:
+            nl = text.find("\n", pos)
+            if nl == -1:
+                line = text[pos:]
+                pos = n
+            else:
+                line = text[pos:nl]
+                pos = nl + 1
+            candidate = line.rstrip("\r")
+            if strip_tabs:
+                candidate = candidate.lstrip("\t")
+            if candidate == delim:
+                break
+            if not delim_quoted:
+                body_lines.append(line)
+        if not delim_quoted and body_lines:
+            nested.extend(_extract_heredoc_substitutions("\n".join(body_lines)))
+    return pos, nested
+
+
+def split_shell_segments(command: str, depth: int = 0) -> list[list[Token]]:
+    """Split `command` into lists of `Token` representing simple commands.
+
+    Nested command substitutions (`$(...)`, backticks) in unquoted words,
+    double-quoted strings, and unquoted heredocs are appended as their own
+    command segments without splitting the enclosing command.
+    """
     segments: list[list[Token]] = []
+    nested_commands: list[str] = []
     cur_seg: list[Token] = []
     cur_chars: list[str] = []
     in_token = False
     tok_quoted = False
+    saw_quote_before_eq = False
+    assign_unquoted = False
     quote: str | None = None
 
-    pending_heredocs: list[tuple[str, bool]] = []
+    pending_heredocs: list[tuple[str, bool, bool]] = []
     expect_heredoc_delim: bool | None = None  # None or strip_tabs bool
 
     i = 0
     n = len(command)
 
     def flush_tok() -> None:
-        nonlocal in_token, tok_quoted, expect_heredoc_delim
+        nonlocal in_token, tok_quoted, saw_quote_before_eq, assign_unquoted, expect_heredoc_delim
         if not in_token:
             return
         word = "".join(cur_chars)
         cur_chars.clear()
         quoted = tok_quoted
+        assign_ok = assign_unquoted
         in_token = False
         tok_quoted = False
-        cur_seg.append(Token(word, quoted=quoted, is_redir=False))
+        saw_quote_before_eq = False
+        assign_unquoted = False
+        cur_seg.append(
+            Token(word, quoted=quoted, is_redir=False, assign_prefix_unquoted=assign_ok)
+        )
         if expect_heredoc_delim is not None:
-            pending_heredocs.append((word, expect_heredoc_delim))
+            pending_heredocs.append((word, expect_heredoc_delim, quoted))
             expect_heredoc_delim = None
 
     def flush_seg() -> None:
@@ -155,17 +297,35 @@ def split_shell_segments(command: str) -> list[list[Token]]:
                 continue
             if ch == '"':
                 quote = None
-            else:
-                cur_chars.append(ch)
+                i += 1
+                continue
+            if ch == "$" and i + 1 < n and command[i + 1] == "(":
+                if command.startswith("$((", i):
+                    raw, i = _read_arith_expansion(command, i)
+                    cur_chars.append(raw)
+                else:
+                    start = i
+                    inner, i = _read_dollar_paren(command, i)
+                    cur_chars.append(command[start:i])
+                    nested_commands.append(inner)
+                continue
+            if ch == "`":
+                start = i
+                inner, i = _read_backtick(command, i)
+                cur_chars.append(command[start:i])
+                nested_commands.append(inner)
+                continue
+            cur_chars.append(ch)
             i += 1
             continue
 
         # Outside quotes
         if ch == "\\" and i + 1 < n:
             if command[i + 1] == "\n":
-                # Line continuation
                 i += 2
                 continue
+            if not assign_unquoted:
+                saw_quote_before_eq = True
             cur_chars.append(command[i + 1])
             in_token = True
             tok_quoted = True
@@ -173,13 +333,37 @@ def split_shell_segments(command: str) -> list[list[Token]]:
             continue
 
         if ch == "$" and i + 1 < n and command[i + 1] == "'":
+            if not assign_unquoted:
+                saw_quote_before_eq = True
             frag, i = _read_ansi_c_quote(command, i)
             cur_chars.append(frag)
             in_token = True
             tok_quoted = True
             continue
 
+        if ch == "$" and i + 1 < n and command[i + 1] == "(":
+            if command.startswith("$((", i):
+                raw, i = _read_arith_expansion(command, i)
+                cur_chars.append(raw)
+            else:
+                start = i
+                inner, i = _read_dollar_paren(command, i)
+                cur_chars.append(command[start:i])
+                nested_commands.append(inner)
+            in_token = True
+            continue
+
+        if ch == "`":
+            start = i
+            inner, i = _read_backtick(command, i)
+            cur_chars.append(command[start:i])
+            nested_commands.append(inner)
+            in_token = True
+            continue
+
         if ch in {"'", '"'}:
+            if not assign_unquoted:
+                saw_quote_before_eq = True
             quote = ch
             in_token = True
             tok_quoted = True
@@ -195,7 +379,8 @@ def split_shell_segments(command: str) -> list[list[Token]]:
             flush_seg()
             i += 1
             if pending_heredocs:
-                i = _consume_heredoc_bodies(command, i, pending_heredocs)
+                i, heredoc_subs = _consume_heredoc_bodies(command, i, pending_heredocs)
+                nested_commands.extend(heredoc_subs)
                 pending_heredocs.clear()
             continue
 
@@ -226,6 +411,8 @@ def split_shell_segments(command: str) -> list[list[Token]]:
                 prefix_fd = "".join(cur_chars)
                 cur_chars.clear()
                 in_token = False
+                saw_quote_before_eq = False
+                assign_unquoted = False
             else:
                 flush_tok()
 
@@ -271,9 +458,19 @@ def split_shell_segments(command: str) -> list[list[Token]]:
                 i += 1
             continue
 
+        if ch == "=" and not assign_unquoted and not saw_quote_before_eq:
+            prefix_text = "".join(cur_chars)
+            if ASSIGN_NAME_RE.fullmatch(prefix_text):
+                assign_unquoted = True
         cur_chars.append(ch)
         in_token = True
         i += 1
 
     flush_seg()
+
+    if depth < MAX_SUBST_DEPTH:
+        for sub in nested_commands:
+            if sub.strip():
+                segments.extend(split_shell_segments(sub, depth=depth + 1))
+
     return segments

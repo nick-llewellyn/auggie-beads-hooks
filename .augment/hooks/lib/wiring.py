@@ -22,7 +22,9 @@ from shell_tokens import Token, split_shell_segments
 HOOK_SCRIPT_NAMES = {"beads-prime.sh", "beads-sync.sh", "beads-guard.sh"}
 SHELL_WRAPPERS = {"sh", "bash", "zsh", "dash"}
 GENERIC_WRAPPERS = {"env", "exec", "command", "nohup", "time", "nice"}
-CONTROL_KEYWORDS = {"if", "then", "elif", "else", "do", "{", "!", "coproc"}
+CONTROL_KEYWORDS = {"if", "then", "elif", "else", "while", "until", "do", "{", "!", "coproc"}
+STDIN_FILE_REDIRS = {"<", "0<", "<>", "0<>"}
+STDIN_OVERRIDE_REDIRS = {"<<<", "0<<<", "<<", "0<<", "<<-", "0<<-", "<&", "0<&"}
 WRAPPER_VALUE_FLAGS: dict[str, set[str]] = {
     "env": {"-u", "-C", "-S"},
     "exec": {"-a"},
@@ -91,7 +93,7 @@ def _segment_hook_scripts(tokens: list[Token], depth: int = 0) -> set[str]:
         if not tok.quoted and tok.text in CONTROL_KEYWORDS:
             idx += 1
             continue
-        if not tok.quoted and ENV_ASSIGN_RE.match(tok.text):
+        if tok.assign_prefix_unquoted:
             idx += 1
             continue
 
@@ -109,7 +111,7 @@ def _segment_hook_scripts(tokens: list[Token], depth: int = 0) -> set[str]:
                 if w.text == "--":
                     idx += 1
                     break
-                if base == "env" and not w.quoted and ENV_ASSIGN_RE.match(w.text):
+                if base == "env" and ENV_ASSIGN_RE.match(w.text):
                     idx += 1
                     continue
                 if w.text in val_flags:
@@ -160,30 +162,29 @@ def _segment_hook_scripts(tokens: list[Token], depth: int = 0) -> set[str]:
                     continue
                 break
 
-            if reads_stdin:
-                # Shell reads stdin (`bash -s < script`); ignore positional args, check `<` redirect.
-                for k in range(j, n - 1):
-                    if tokens[k].is_redir and tokens[k].text in {"<", "0<"}:
-                        hit = _matched_hook_script(tokens[k + 1])
-                        if hit:
-                            return {hit}
-                return set()
+            # Track all positional operands and the FINAL stdin redirection source.
+            positionals: list[Token] = []
+            final_stdin_script: str | None = None
+            k = j
+            while k < n:
+                cur = tokens[k]
+                if cur.is_redir:
+                    target = tokens[k + 1] if k + 1 < n else None
+                    if cur.text in STDIN_FILE_REDIRS:
+                        final_stdin_script = _matched_hook_script(target) if target else None
+                    elif cur.text in STDIN_OVERRIDE_REDIRS:
+                        final_stdin_script = None
+                    k += 2
+                    continue
+                positionals.append(cur)
+                k += 1
 
-            if j < n:
-                if tokens[j].is_redir and tokens[j].text in {"<", "0<"} and j + 1 < n:
-                    # Only if no script operand follows after output redirects
-                    candidate = tokens[j + 1]
-                    k = j + 2
-                    while k < n:
-                        if tokens[k].is_redir:
-                            k += 2
-                        else:
-                            return set()
-                    hit = _matched_hook_script(candidate)
-                    return {hit} if hit else set()
-                hit = _matched_hook_script(tokens[j])
+            if reads_stdin:
+                return {final_stdin_script} if final_stdin_script else set()
+            if positionals:
+                hit = _matched_hook_script(positionals[0])
                 return {hit} if hit else set()
-            return set()
+            return {final_stdin_script} if final_stdin_script else set()
 
         hit = _matched_hook_script(tok)
         return {hit} if hit else set()
@@ -325,84 +326,30 @@ def _hook_targets_prefix(hook: dict[str, Any], prefix: Path | None) -> bool:
 
 def check_transition_compat(
     settings_path: Path,
-    agy_hooks_path: Path,
-    target_layout: str,
-    will_wire: bool,
+    will_wire_auggie: bool,
     target_tag: str,
     prefix: Path | None = None,
 ) -> None:
-    """Guard against switching `current` to a layout incompatible with active wiring."""
-    if target_layout == "legacy":
-        if will_wire:
-            die(
-                f"cannot --wire legacy release {target_tag} with this installer; "
-                f"run 'install.sh --agent all --unwire', then 'install.sh {target_tag}', "
-                "then run that release's own 'install.sh --wire'."
-            )
-        issues: list[str] = []
-        if settings_path.exists():
-            data = load_json_object(settings_path)
-            hooks = data.get("hooks")
-            if isinstance(hooks, dict):
-                for event, entries in hooks.items():
-                    if not isinstance(entries, list):
-                        continue
-                    for entry in entries:
-                        for h in _iter_event_hooks(entry):
-                            if not _hook_targets_prefix(h, prefix):
-                                continue
-                            scripts = executed_hook_scripts(_command_line_of(h))
-                            if "beads-guard.sh" in scripts:
-                                issues.append(
-                                    f"{settings_path} wires beads-guard.sh on {event}, "
-                                    f"which does not exist in legacy release {target_tag}"
-                                )
-        if agy_hooks_path.exists():
-            agy_data = load_json_object(agy_hooks_path)
-            group = agy_data.get(ANTIGRAVITY_GROUP_NAME)
-            if isinstance(group, dict):
-                targets_here = False
-                for entries in group.values():
-                    if not isinstance(entries, list):
-                        continue
-                    for entry in entries:
-                        for h in _iter_event_hooks(entry):
-                            if _hook_targets_prefix(h, prefix):
-                                targets_here = True
-                if targets_here:
-                    issues.append(
-                        f"{agy_hooks_path} wires the '{ANTIGRAVITY_GROUP_NAME}' hook group, "
-                        f"which legacy release {target_tag} does not support"
-                    )
-        if issues:
-            detail = "\n  - ".join(issues)
-            die(
-                f"refusing to switch 'current' to legacy release {target_tag} while incompatible "
-                f"wiring is active:\n  - {detail}\n"
-                "Unwire first with 'install.sh --agent all --unwire', install the legacy tag, "
-                "then wire with that release's own install.sh."
-            )
+    """Reject switching `current` when Auggie still wires legacy PostToolUse without migrating."""
+    if will_wire_auggie or not settings_path.exists():
         return
-
-    # target_layout == "new"
-    if not will_wire and settings_path.exists():
-        data = load_json_object(settings_path)
-        hooks = data.get("hooks")
-        if isinstance(hooks, dict):
-            post_entries = hooks.get("PostToolUse")
-            if isinstance(post_entries, list):
-                for entry in post_entries:
-                    for h in _iter_event_hooks(entry):
-                        if not _hook_targets_prefix(h, prefix):
-                            continue
-                        if "beads-sync.sh" in executed_hook_scripts(_command_line_of(h)):
-                            die(
-                                f"refusing to switch 'current' to {target_tag} while {settings_path} "
-                                "still has legacy PostToolUse wiring for beads-sync.sh.\n"
-                                f"Re-run with '--wire' (e.g. 'install.sh {target_tag} --wire' or "
-                                f"'install.sh {target_tag} --agent all --wire') to migrate wiring "
-                                "to PreToolUse/Stop/SessionEnd."
-                            )
+    data = load_json_object(settings_path)
+    hooks = data.get("hooks")
+    if isinstance(hooks, dict):
+        post_entries = hooks.get("PostToolUse")
+        if isinstance(post_entries, list):
+            for entry in post_entries:
+                for h in _iter_event_hooks(entry):
+                    if not _hook_targets_prefix(h, prefix):
+                        continue
+                    if "beads-sync.sh" in executed_hook_scripts(_command_line_of(h)):
+                        die(
+                            f"refusing to switch 'current' to {target_tag} while {settings_path} "
+                            "still has legacy PostToolUse wiring for beads-sync.sh.\n"
+                            f"Re-run with '--agent auggie --wire' or '--agent all --wire' "
+                            f"(e.g. 'install.sh {target_tag} --agent all --wire') to migrate "
+                            "Auggie wiring to PreToolUse/Stop/SessionEnd."
+                        )
 
 
 def wire_auggie(settings_path: Path, hooks_dir: Path | None, wire: bool) -> None:
@@ -583,7 +530,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--antigravity-hooks", required=True)
     parser.add_argument("--hooks-dir", default="")
     parser.add_argument("--prefix", default="")
-    parser.add_argument("--target-layout", choices=("new", "legacy"), default="new")
     parser.add_argument("--will-wire", choices=("0", "1"), default="0")
     parser.add_argument("--target-tag", default="")
     args = parser.parse_args(sys.argv[1:] if argv is None else argv)
@@ -599,9 +545,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.action == "check-compat":
         check_transition_compat(
             settings_path=settings_path,
-            agy_hooks_path=agy_hooks_path,
-            target_layout=args.target_layout,
-            will_wire=args.will_wire == "1",
+            will_wire_auggie=(args.will_wire == "1" and do_auggie),
             target_tag=args.target_tag or "target",
             prefix=prefix_path,
         )

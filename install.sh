@@ -85,44 +85,19 @@ esac
 [ $((WIRE + UNWIRE + STATUS)) -le 1 ] || die "give one of --wire, --unwire and --status"
 [ -z "$TAG" ] || [ $((UNWIRE + STATUS)) -eq 0 ] || die "a tag goes with --wire only"
 
-release_layout() {
-  local hooks=$1/.augment/hooks
-  if [ -f "$hooks/lib/beads_hook.py" ]; then
-    echo "new"
-  elif [ -f "$hooks/lib/command-scan.sh" ] && [ -f "$hooks/lib/command_scan.py" ]; then
-    echo "legacy"
-  else
-    echo "unknown"
-  fi
-}
-
-# Validates a release directory. Supports both the current Python-core layout
-# and legacy v0.1.x/v0.2.x releases so rollbacks remain possible after unwiring.
+# Validates a release directory against the current Python-core hook layout.
 check_release() {
-  local hooks=$1/.augment/hooks f layout
-  [ -x "$hooks/beads-prime.sh" ] && [ -x "$hooks/beads-sync.sh" ] || return 1
-  layout=$(release_layout "$1")
-
-  if [ "$layout" = "new" ]; then
-    [ -x "$hooks/beads-guard.sh" ] || return 1
-    [ -f "$hooks/lib/wiring.py" ] && [ -f "$hooks/lib/shell_tokens.py" ] || return 1
-    for f in "$hooks"/*.sh; do
-      bash -n "$f" 2>/dev/null || return 1
-    done
-    python3 -B -c '
+  local hooks=$1/.augment/hooks f
+  [ -x "$hooks/beads-prime.sh" ] && [ -x "$hooks/beads-sync.sh" ] && [ -x "$hooks/beads-guard.sh" ] || return 1
+  [ -f "$hooks/lib/beads_hook.py" ] && [ -f "$hooks/lib/wiring.py" ] && [ -f "$hooks/lib/shell_tokens.py" ] || return 1
+  for f in "$hooks"/*.sh; do
+    bash -n "$f" 2>/dev/null || return 1
+  done
+  python3 -B -c '
 import sys
 for p in sys.argv[1:]:
     compile(open(p, "rb").read(), p, "exec")
 ' "$hooks/lib/shell_tokens.py" "$hooks/lib/beads_hook.py" "$hooks/lib/wiring.py" 2>/dev/null || return 1
-  elif [ "$layout" = "legacy" ]; then
-    for f in "$hooks"/*.sh "$hooks"/lib/*.sh; do
-      bash -n "$f" 2>/dev/null || return 1
-    done
-    python3 -B -c 'import sys; compile(open(sys.argv[1], "rb").read(), sys.argv[1], "exec")' \
-      "$hooks/lib/command_scan.py" 2>/dev/null || return 1
-  else
-    return 1
-  fi
 
   if [ -e "$1/install.sh" ]; then
     [ -x "$1/install.sh" ] && bash -n "$1/install.sh" 2>/dev/null || return 1
@@ -163,17 +138,16 @@ install_release() {
   need python3
   mkdir -p "$PREFIX"
   PREFIX=$(cd "$PREFIX" && pwd -P)
-  local dest=$PREFIX/$TAG layout helper
+  local dest=$PREFIX/$TAG helper
   if [ -e "$dest" ]; then
     check_release "$dest" ||
       die "$dest is not a complete install of $TAG; remove it and run again"
-    layout=$(release_layout "$dest")
     helper=$(find_wiring_helper)
     python3 -B "$helper" check-compat \
       --prefix "$PREFIX" \
+      --agent "$AGENT" \
       --settings "$SETTINGS" \
       --antigravity-hooks "$ANTIGRAVITY_HOOKS" \
-      --target-layout "$layout" \
       --will-wire "$WIRE" \
       --target-tag "$TAG"
     echo "$TAG is already installed in $dest"
@@ -187,13 +161,12 @@ install_release() {
       die "could not check out $TAG"
     check_release "$TMP/$TAG" ||
       die "$TAG fails the release check: an entry point is missing or not executable, or a script does not parse"
-    layout=$(release_layout "$TMP/$TAG")
     helper=$(find_wiring_helper)
     python3 -B "$helper" check-compat \
       --prefix "$PREFIX" \
+      --agent "$AGENT" \
       --settings "$SETTINGS" \
       --antigravity-hooks "$ANTIGRAVITY_HOOKS" \
-      --target-layout "$layout" \
       --will-wire "$WIRE" \
       --target-tag "$TAG"
     python3 -B -c 'import os, sys; os.rename(sys.argv[1], sys.argv[2])' \

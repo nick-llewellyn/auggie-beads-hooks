@@ -137,16 +137,25 @@ or `--prefix <dir>`), verifies the scripts, and atomically switches `current`.
 
 ### Updating and rolling back
 
+Between releases sharing this layout (`v0.3.0` and later):
+
 ```bash
 ~/.local/share/auggie-beads-hooks/current/install.sh <new-tag>
 ```
 
-Moving `current` takes effect immediately for subsequent hook invocations.
-Upgrading from a legacy `v0.2.x` install (which wired `PostToolUse`) requires
-passing `--wire` (or `--agent all --wire`) to migrate the hook routes cleanly.
-Rolling back to a legacy `v0.2.x` release requires unwiring first
-(`install.sh --agent all --unwire`) so `PreToolUse` and Antigravity routes do
-not point at missing or incompatible scripts.
+Moving `current` takes effect immediately for subsequent hook invocations, and
+installing an already-installed `v0.3.x+` tag rolls `current` back to it.
+
+This release is a breaking layout change from `v0.1.x`/`v0.2.x` (backwards
+compatibility and rollbacks to pre-`v0.3.0` scanner releases are not supported).
+To upgrade from an existing `v0.2.x` installation, clone the new tag and run
+its `install.sh` with `--wire` so legacy `PostToolUse` wiring is migrated to
+`PreToolUse` / `Stop` / `SessionEnd`:
+
+```bash
+git clone --depth 1 --branch <tag> https://github.com/nick-llewellyn/auggie-beads-hooks /tmp/auggie-beads-hooks
+/tmp/auggie-beads-hooks/install.sh <tag> --agent all --wire
+```
 
 ### Moving a project off an old local copy
 

@@ -120,6 +120,12 @@ if cmd == "config" and len(args) >= 3 and args[1] == "get":
     sys.exit(0)
 
 if cmd == "dolt" and len(args) >= 3 and args[1] == "remote" and args[2] == "list":
+    delay = float(os.environ.get("BD_REMOTES_SLEEP", "0"))
+    if delay > 0:
+        time.sleep(delay)
+    if os.environ.get("BD_REMOTES_FAIL") == "1":
+        sys.stderr.write("Error: failed to read dolt remotes\\n")
+        sys.exit(1)
     remotes = os.environ.get("BD_REMOTES", "")
     if remotes.strip():
         print(remotes)
@@ -483,6 +489,32 @@ class TestPrimeHook(HookTestBase):
         # Pull must be bounded well inside total budget so bd prime still succeeds
         self.assertIn("PRIMED-CONTEXT", res.stdout)
 
+    def test_probes_pass_json_false_and_report_remote_list_failures(self) -> None:
+        ws = self.tmp / "remote-err"
+        self.make_store(ws)
+        res_prime = self.run_hook(
+            PRIME_SH,
+            payload={"workspace_roots": [str(ws)]},
+            extra_env={"BD_REMOTES_FAIL": "1"},
+        )
+        self.assertEqual(res_prime.returncode, 0)
+        self.assertIn("bd dolt remote list", res_prime.stdout)
+        self.assertIn("PRIMED-CONTEXT", res_prime.stdout)
+        calls = [a for _, a in self.bd_calls()]
+        self.assertIn("where --json=false", calls)
+        self.assertIn("config get dolt.local-only --json=false", calls)
+        self.assertIn("dolt remote list --json=false", calls)
+
+        self.log_file.write_text("", encoding="utf-8")
+        res_sync = self.run_hook(
+            SYNC_SH,
+            payload={"hook_event_name": "Stop", "workspace_roots": [str(ws)]},
+            extra_env={"BD_REMOTES_FAIL": "1"},
+        )
+        self.assertEqual(res_sync.returncode, 0)
+        self.assertIn("bd dolt remote list", res_sync.stderr)
+        self.assertIn(str(ws), res_sync.stderr)
+
 
 class TestGuardHook(HookTestBase):
     BLOCKED_COMMANDS = [
@@ -493,6 +525,8 @@ class TestGuardHook(HookTestBase):
         "bd --directory /tmp/x --quiet edit abh-1",
         "/opt/homebrew/bin/bd edit abh-1",
         "BEADS_DIR=/tmp/.beads bd edit abh-1",
+        'EDITOR="vim" bd edit abh-1',
+        'env "EDITOR=vim" bd edit abh-1',
         "env FOO=1 -u BAR bd edit abh-1",
         "command bd edit abh-1",
         "exec bd edit abh-1",
@@ -505,12 +539,19 @@ class TestGuardHook(HookTestBase):
         "b''d edit abh-1",
         "bd ed''it abh-1",
         '"bd" "edit" abh-1',
-        # Control constructs
+        # Control constructs (including loop conditions)
         "if true; then bd edit abh-1; fi",
         "if false; then true; else bd edit abh-1; fi",
         "while true; do bd edit abh-1; done",
+        "while bd edit abh-1; do :; done",
+        "until bd edit abh-1; do :; done",
         "{ bd edit abh-1; }",
         "! bd edit abh-1",
+        # Command substitutions (unquoted, double-quoted, backticks, unquoted heredoc)
+        'echo "$(bd edit abh-1)"',
+        "echo $(bd edit abh-1)",
+        "echo `bd edit abh-1`",
+        "cat <<EOF\n$(bd edit abh-1)\nEOF",
         # Command after a heredoc closes
         "cat <<'EOF'\nhello\nEOF\nbd edit abh-1",
     ]
@@ -524,12 +565,19 @@ class TestGuardHook(HookTestBase):
         "bd --help edit",
         'echo "bd edit abh-1"',
         "echo 'bd edit abh-1'",
+        "echo '$(bd edit abh-1)'",
+        r'echo "\$(bd edit abh-1)"',
+        r"echo \$\(bd edit abh-1\)",
+        r'echo "\`bd edit abh-1\`"',
+        "echo $(true) bd edit abh-1",
         'git commit -m "block bd edit"',
         "# bd edit abh-1",
         "mybd edit abh-1",
         "rg 'bd edit' README.md",
-        # Quoted heredoc body must NOT trigger the guard
+        # Heredoc literal bodies (quoted delimiter or unquoted without substitution)
         "cat <<'EOF' > README.md\nbd edit abh-1\nEOF",
+        "cat <<'EOF'\n$(bd edit abh-1)\nEOF",
+        "cat <<EOF\nbd edit abh-1\nEOF",
         "cat <<-EOF\n\tbd edit abh-1\n\tEOF",
         # Quoted control keyword or argument is not a command boundary
         'echo "then" bd edit abh-1',
@@ -762,6 +810,7 @@ class TestSyncHook(HookTestBase):
             assert proc.stdin is not None
             proc.stdin.write(json.dumps({"hook_event_name": "SessionEnd", "workspace_roots": [str(r1), str(r2)]}))
             proc.stdin.close()
+            proc.stdin = None
 
             # Wait deterministically until root2's commit has started
             deadline = time.monotonic() + 5.0
@@ -1053,7 +1102,7 @@ class TestInstallerAndWiring(HookTestBase):
         self.assertNotEqual(res.returncode, 0)
         self.assertEqual(aug_settings.read_text(encoding="utf-8"), '{"keep": true}\n')
 
-    def test_supports_legacy_v02_rollback_layout(self) -> None:
+    def test_rejects_legacy_v02_release_and_guards_auggie_upgrade_wiring(self) -> None:
         legacy_src = self.tmp / "legacy-src"
         legacy_src.mkdir()
         subprocess.run(["git", "init", "-q", str(legacy_src)], check=True)
@@ -1074,94 +1123,33 @@ class TestInstallerAndWiring(HookTestBase):
         git("commit", "-qm", "v0.2.1")
         git("tag", "v0.2.1")
 
-        prefix = self.tmp / "rollback-prefix"
-        aug_settings = self.tmp / "rb-settings.json"
-        agy_hooks = self.tmp / "rb-hooks.json"
+        prefix = self.tmp / "upgrade-prefix"
+        aug_settings = self.tmp / "ug-settings.json"
+        agy_hooks = self.tmp / "ug-hooks.json"
 
-        # First install and wire v0.3.0 for both agents
+        # Pre-v0.3.0 legacy releases are not supported and MUST be rejected by check_release
+        res_legacy = subprocess.run(
+            [
+                BASH_BIN,
+                str(INSTALL_SH),
+                "--prefix",
+                str(prefix),
+                "--source",
+                f"file://{legacy_src}",
+                "--settings",
+                str(aug_settings),
+                "--antigravity-hooks",
+                str(agy_hooks),
+                "v0.2.1",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(res_legacy.returncode, 0)
+        self.assertIn("fails the release check", res_legacy.stderr)
+
+        # Simulate an existing legacy PostToolUse wiring targeting this prefix
         new_src = self._make_git_source()
-        subprocess.run(
-            [
-                BASH_BIN,
-                str(INSTALL_SH),
-                "--prefix",
-                str(prefix),
-                "--source",
-                f"file://{new_src}",
-                "--settings",
-                str(aug_settings),
-                "--antigravity-hooks",
-                str(agy_hooks),
-                "--agent",
-                "all",
-                "v0.3.0",
-                "--wire",
-            ],
-            check=True,
-            capture_output=True,
-        )
-
-        # Switching to legacy v0.2.1 while v0.3.0 / Antigravity wiring is active MUST be rejected
-        res_reject = subprocess.run(
-            [
-                BASH_BIN,
-                str(INSTALL_SH),
-                "--prefix",
-                str(prefix),
-                "--source",
-                f"file://{legacy_src}",
-                "--settings",
-                str(aug_settings),
-                "--antigravity-hooks",
-                str(agy_hooks),
-                "v0.2.1",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        self.assertNotEqual(res_reject.returncode, 0)
-        self.assertIn("refusing to switch", res_reject.stderr)
-        self.assertEqual(os.readlink(prefix / "current"), "v0.3.0")
-
-        # After unwiring, switching to legacy v0.2.1 succeeds
-        subprocess.run(
-            [
-                BASH_BIN,
-                str(INSTALL_SH),
-                "--prefix",
-                str(prefix),
-                "--settings",
-                str(aug_settings),
-                "--antigravity-hooks",
-                str(agy_hooks),
-                "--agent",
-                "all",
-                "--unwire",
-            ],
-            check=True,
-            capture_output=True,
-        )
-        res_ok = subprocess.run(
-            [
-                BASH_BIN,
-                str(INSTALL_SH),
-                "--prefix",
-                str(prefix),
-                "--source",
-                f"file://{legacy_src}",
-                "--settings",
-                str(aug_settings),
-                "--antigravity-hooks",
-                str(agy_hooks),
-                "v0.2.1",
-            ],
-            capture_output=True,
-            text=True,
-        )
-        self.assertEqual(res_ok.returncode, 0, res_ok.stderr)
-        self.assertEqual(os.readlink(prefix / "current"), "v0.2.1")
-
-        # Upgrading back to v0.3.0 WITHOUT --wire when legacy PostToolUse wiring exists MUST be rejected
         aug_settings.write_text(
             json.dumps(
                 {
@@ -1177,7 +1165,9 @@ class TestInstallerAndWiring(HookTestBase):
             ),
             encoding="utf-8",
         )
-        res_upgrade_reject = subprocess.run(
+
+        # Tag-only install without --wire MUST be rejected
+        res_no_wire = subprocess.run(
             [
                 BASH_BIN,
                 str(INSTALL_SH),
@@ -1194,12 +1184,11 @@ class TestInstallerAndWiring(HookTestBase):
             capture_output=True,
             text=True,
         )
-        self.assertNotEqual(res_upgrade_reject.returncode, 0)
-        self.assertIn("Re-run with '--wire'", res_upgrade_reject.stderr)
-        self.assertEqual(os.readlink(prefix / "current"), "v0.2.1")
+        self.assertNotEqual(res_no_wire.returncode, 0)
+        self.assertIn("legacy PostToolUse wiring", res_no_wire.stderr)
 
-        # Passing --wire succeeds and migrates wiring cleanly
-        res_upgrade_ok = subprocess.run(
+        # `--agent antigravity --wire` does NOT migrate Auggie, so it MUST also be rejected
+        res_agy_only = subprocess.run(
             [
                 BASH_BIN,
                 str(INSTALL_SH),
@@ -1211,13 +1200,39 @@ class TestInstallerAndWiring(HookTestBase):
                 str(aug_settings),
                 "--antigravity-hooks",
                 str(agy_hooks),
+                "--agent",
+                "antigravity",
                 "v0.3.0",
                 "--wire",
             ],
             capture_output=True,
             text=True,
         )
-        self.assertEqual(res_upgrade_ok.returncode, 0, res_upgrade_ok.stderr)
+        self.assertNotEqual(res_agy_only.returncode, 0)
+        self.assertIn("legacy PostToolUse wiring", res_agy_only.stderr)
+
+        # `--agent all --wire` migrates Auggie AND wires Antigravity cleanly
+        res_all_ok = subprocess.run(
+            [
+                BASH_BIN,
+                str(INSTALL_SH),
+                "--prefix",
+                str(prefix),
+                "--source",
+                f"file://{new_src}",
+                "--settings",
+                str(aug_settings),
+                "--antigravity-hooks",
+                str(agy_hooks),
+                "--agent",
+                "all",
+                "v0.3.0",
+                "--wire",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(res_all_ok.returncode, 0, res_all_ok.stderr)
         self.assertEqual(os.readlink(prefix / "current"), "v0.3.0")
 
     def test_wiring_tokenizer_edge_cases(self) -> None:
@@ -1236,10 +1251,18 @@ class TestInstallerAndWiring(HookTestBase):
                             {"matcher": "bash", "hooks": [{"type": "command", "command": "# note\n/old/beads-sync.sh"}]},
                             {"matcher": "bash", "hooks": [{"type": "command", "command": "cat <<EOF\ntext\nEOF\n/old/beads-sync.sh"}]},
                             {"matcher": "bash", "hooks": [{"type": "command", "command": "cat <<<text\n/old/beads-sync.sh"}]},
+                            {"matcher": "bash", "hooks": [{"type": "command", "command": 'X="1" /old/beads-sync.sh'}]},
+                            {"matcher": "bash", "hooks": [{"type": "command", "command": 'env "FOO=1" /old/beads-sync.sh'}]},
+                            {"matcher": "bash", "hooks": [{"type": "command", "command": "bash -s </dev/null </old/beads-sync.sh"}]},
+                            {"matcher": "bash", "hooks": [{"type": "command", "command": 'echo "$(/old/beads-sync.sh)"'}]},
                         ],
                         "Stop": [
                             {"hooks": [{"type": "command", "command": "echo ';' /old/beads-sync.sh"}]},
                             {"hooks": [{"type": "command", "command": "cat <<EOF\n/old/beads-sync.sh\nEOF"}]},
+                            {"hooks": [{"type": "command", "command": 'X="/old/beads-sync.sh" true'}]},
+                            {"hooks": [{"type": "command", "command": "bash -s </old/beads-sync.sh </dev/null"}]},
+                            {"hooks": [{"type": "command", "command": "bash </old/beads-sync.sh 0<&-"}]},
+                            {"hooks": [{"type": "command", "command": "echo $(true) /old/beads-sync.sh"}]},
                         ],
                     }
                 }
@@ -1270,13 +1293,20 @@ class TestInstallerAndWiring(HookTestBase):
         r1 = run_inst("v0.3.0", "--wire")
         self.assertEqual(r1.returncode, 0, r1.stderr)
         data = json.loads(aug_settings.read_text(encoding="utf-8"))
-        # All 4 executed PostToolUse hooks removed (newline, comment+newline, post-heredoc, post-herestring)
+        # All 8 executed PostToolUse hooks removed
         self.assertNotIn("PostToolUse", data["hooks"])
-        # Quoted `;` and heredoc-body mentions preserved on Stop alongside newly wired sync
+        # All 6 non-executing Stop mentions preserved alongside newly wired sync
         stop_cmds = [e["hooks"][0]["command"] for e in data["hooks"]["Stop"]]
-        self.assertIn("echo ';' /old/beads-sync.sh", stop_cmds)
-        self.assertIn("cat <<EOF\n/old/beads-sync.sh\nEOF", stop_cmds)
-        self.assertEqual(len(stop_cmds), 3)
+        for expected_kept in (
+            "echo ';' /old/beads-sync.sh",
+            "cat <<EOF\n/old/beads-sync.sh\nEOF",
+            'X="/old/beads-sync.sh" true',
+            "bash -s </old/beads-sync.sh </dev/null",
+            "bash </old/beads-sync.sh 0<&-",
+            "echo $(true) /old/beads-sync.sh",
+        ):
+            self.assertIn(expected_kept, stop_cmds)
+        self.assertEqual(len(stop_cmds), 7)
 
         # Second wire MUST be idempotent even with `+` in prefix
         r2 = run_inst("--wire")
@@ -1291,12 +1321,12 @@ class TestInstallerAndWiring(HookTestBase):
         self.assertIn("wired: Stop:", r_st.stdout)
         self.assertIn("wired: SessionEnd:", r_st.stdout)
 
-        # Unwire removes all 4 wired entries and preserves the 2 Stop mentions
+        # Unwire removes all 4 wired entries and preserves the 6 Stop mentions
         r_un = run_inst("--unwire")
         self.assertEqual(r_un.returncode, 0, r_un.stderr)
         data_after = json.loads(aug_settings.read_text(encoding="utf-8"))
         self.assertEqual(list(data_after["hooks"].keys()), ["Stop"])
-        self.assertEqual(len(data_after["hooks"]["Stop"]), 2)
+        self.assertEqual(len(data_after["hooks"]["Stop"]), 6)
 
 
 if __name__ == "__main__":

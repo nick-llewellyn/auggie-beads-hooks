@@ -76,7 +76,7 @@ WRAPPER_VALUE_FLAGS: dict[str, set[str]] = {
 }
 WRAPPER_COMMANDS = {"env", "command", "exec", "nohup", "time", "nice", "sudo"}
 SHELL_COMMANDS = {"sh", "bash", "zsh", "dash"}
-CONTROL_KEYWORDS = {"if", "then", "elif", "else", "do", "{", "!", "coproc"}
+CONTROL_KEYWORDS = {"if", "then", "elif", "else", "while", "until", "do", "{", "!", "coproc"}
 
 ENV_ASSIGN_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*\+?=")
 
@@ -295,7 +295,7 @@ def discover_store(
 
     try:
         res = subprocess.run(
-            [bd_path, "where"],
+            [bd_path, "where", "--json=false"],
             cwd=str(candidate_dir),
             env=env,
             stdin=subprocess.DEVNULL,
@@ -443,7 +443,7 @@ def get_bd_config(
         return None
     try:
         res = subprocess.run(
-            [bd_path, "config", "get", key],
+            [bd_path, "config", "get", key, "--json=false"],
             cwd=str(run_dir),
             env=env,
             stdin=subprocess.DEVNULL,
@@ -473,16 +473,20 @@ def list_dolt_remotes(
     env: dict[str, str],
     deadline: float,
     pass_fds: tuple[int, ...] = (),
-) -> set[str]:
-    """Return configured Dolt remote names from `bd dolt remote list`."""
+) -> tuple[set[str] | None, str | None]:
+    """Return `(remotes, error)` from `bd dolt remote list --json=false`.
+
+    Distinguishes a clean empty remote listing (`(set(), None)`) from probe
+    timeouts, launch failures, or non-zero exits (`(None, warning)`).
+    """
     op_timeout = _bounded_timeout(
         _env_float("BEADS_HOOK_PROBE_TIMEOUT", DEFAULT_PROBE_TIMEOUT_S), deadline
     )
     if op_timeout <= 0.0:
-        return set()
+        return None, f"beads: hook time budget exhausted before checking Dolt remotes in {run_dir}."
     try:
         res = subprocess.run(
-            [bd_path, "dolt", "remote", "list"],
+            [bd_path, "dolt", "remote", "list", "--json=false"],
             cwd=str(run_dir),
             env=env,
             stdin=subprocess.DEVNULL,
@@ -492,10 +496,19 @@ def list_dolt_remotes(
             pass_fds=pass_fds,
             check=False,
         )
-    except (OSError, subprocess.TimeoutExpired):
-        return set()
+    except subprocess.TimeoutExpired:
+        return (
+            None,
+            f"beads: 'bd dolt remote list' timed out after {op_timeout:g}s in {run_dir}.",
+        )
+    except OSError as exc:
+        return None, f"beads: 'bd dolt remote list' failed to start in {run_dir}: {exc}"
     if res.returncode != 0:
-        return set()
+        detail = (res.stdout + "\n" + res.stderr).strip()
+        return (
+            None,
+            f"beads: 'bd dolt remote list' failed in {run_dir} (exit {res.returncode}): {detail}",
+        )
 
     remotes: set[str] = set()
     for line in res.stdout.splitlines():
@@ -514,7 +527,7 @@ def list_dolt_remotes(
             name, target = parts[0], parts[1]
             if "://" in target or "/" in target or ":" in target:
                 remotes.add(name)
-    return remotes
+    return remotes, None
 
 
 def resolve_pull_remote(
@@ -523,12 +536,15 @@ def resolve_pull_remote(
     env: dict[str, str],
     deadline: float,
     pass_fds: tuple[int, ...] = (),
-) -> str | None:
-    """Return remote name to pull from on SessionStart, or None if local-only/no remote."""
+) -> tuple[str | None, str | None]:
+    """Return `(remote, error)` for SessionStart pull."""
     if get_bd_config(bd_path, run_dir, "dolt.local-only", env, deadline, pass_fds=pass_fds) == "true":
-        return None
-    remotes = list_dolt_remotes(bd_path, run_dir, env, deadline, pass_fds=pass_fds)
-    return "origin" if "origin" in remotes else None
+        return None, None
+    remotes, err = list_dolt_remotes(bd_path, run_dir, env, deadline, pass_fds=pass_fds)
+    if err is not None:
+        return None, f"{err} Skipped SessionStart pull (context may be stale)."
+    assert remotes is not None
+    return ("origin" if "origin" in remotes else None), None
 
 
 def resolve_push_remote(
@@ -537,16 +553,19 @@ def resolve_push_remote(
     env: dict[str, str],
     deadline: float,
     pass_fds: tuple[int, ...] = (),
-) -> str | None:
-    """Return remote name to push to on sync, or None if pushing is disabled/no remote."""
+) -> tuple[str | None, str | None]:
+    """Return `(remote, error)` for Stop/SessionEnd push."""
     if get_bd_config(bd_path, run_dir, "dolt.local-only", env, deadline, pass_fds=pass_fds) == "true":
-        return None
+        return None, None
     if get_bd_config(bd_path, run_dir, "no-push", env, deadline, pass_fds=pass_fds) == "true":
-        return None
+        return None, None
     if get_bd_config(bd_path, run_dir, "dolt.auto-push", env, deadline, pass_fds=pass_fds) == "false":
-        return None
-    remotes = list_dolt_remotes(bd_path, run_dir, env, deadline, pass_fds=pass_fds)
-    return "origin" if "origin" in remotes else None
+        return None, None
+    remotes, err = list_dolt_remotes(bd_path, run_dir, env, deadline, pass_fds=pass_fds)
+    if err is not None:
+        return None, f"{err} Commits are local and remote push status could not be verified."
+    assert remotes is not None
+    return ("origin" if "origin" in remotes else None), None
 
 
 def _emit_json(payload: dict[str, Any]) -> None:
@@ -594,8 +613,10 @@ def cmd_prime(agent: str) -> int:
             pull_budget = min(pull_cap, max(0.0, _remaining(deadline) - prime_reserve))
             if pull_budget > 0.1 and stores_left > 0:
                 pull_deadline = min(deadline - prime_reserve, time.monotonic() + pull_budget)
-                remote = resolve_pull_remote(bd_path, store.run_dir, env, pull_deadline)
-                if remote:
+                remote, pull_probe_err = resolve_pull_remote(bd_path, store.run_dir, env, pull_deadline)
+                if pull_probe_err:
+                    chunks.append(pull_probe_err)
+                elif remote:
                     actual_pull_timeout = _bounded_timeout(pull_cap, pull_deadline)
                     if actual_pull_timeout <= 0.05:
                         chunks.append(
@@ -714,7 +735,7 @@ def _segment_invokes_bd_edit(tokens: list[Token], depth: int = 0) -> bool:
         if not tok.quoted and tok.text in CONTROL_KEYWORDS:
             idx += 1
             continue
-        if not tok.quoted and ENV_ASSIGN_RE.match(tok.text):
+        if tok.assign_prefix_unquoted:
             idx += 1
             continue
 
@@ -730,7 +751,7 @@ def _segment_invokes_bd_edit(tokens: list[Token], depth: int = 0) -> bool:
                 if w.text == "--":
                     idx += 1
                     break
-                if base == "env" and not w.quoted and ENV_ASSIGN_RE.match(w.text):
+                if base == "env" and ENV_ASSIGN_RE.match(w.text):
                     idx += 1
                     continue
                 if w.text in val_flags:
@@ -933,7 +954,12 @@ def _sync_one_store(
                 )
                 return warnings
 
-            remote = resolve_push_remote(bd_path, store.run_dir, env, deadline, pass_fds=(lock_fd,))
+            remote, push_probe_err = resolve_push_remote(
+                bd_path, store.run_dir, env, deadline, pass_fds=(lock_fd,)
+            )
+            if push_probe_err:
+                warnings.append(push_probe_err)
+                return warnings
             if not remote:
                 return warnings
 

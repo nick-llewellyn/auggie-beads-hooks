@@ -109,7 +109,8 @@ In `## Reproduce`:
      `beads-guard.sh`.
    - **Antigravity (`--agent antigravity`):** `hook_event_name`,
      `workspacePaths` or `cwd` (`workspace_roots` is ignored in Antigravity
-     mode), and `tool_input` for `beads-guard.sh`.
+     mode), and `toolCall` (`name`, `args.CommandLine`) for `beads-guard.sh`
+     (`tool_input` is also accepted as a fallback).
 3. **The output as printed**, with any `beads:` warning verbatim and the exit
    code. Shorten local paths to `…/` or `path/to/`.
 4. **Expected and actual behaviour**, if the output alone does not make the
@@ -204,7 +205,7 @@ Versions: bd 1.3.4 (Homebrew), Antigravity 1.5.14, hooks vX.Y.Z (<commit>),
 macOS, /bin/bash 3.2.57, Python 3.13.
 
 ```console
-$ printf '%s\n' '{"tool_input":{"command":"cat <<< \"bd edit abh-1\""}}' | \
+$ printf '%s\n' '{"toolCall":{"name":"run_command","args":{"CommandLine":"cat <<< \"bd edit abh-1\""}}}' | \
 >   /bin/bash path/to/.augment/hooks/beads-guard.sh --agent antigravity
 # Hypothetical failing output before the fix:
 {"decision": "deny", "reason": "beads: 'bd edit' opens an interactive $EDITOR ..."}
